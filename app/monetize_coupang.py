@@ -54,12 +54,30 @@ def coupang_box(keyword: str) -> str:
 
 
 def inject_coupang(html: str, keyword: str) -> str:
-    box = coupang_box(keyword)
-    if not box:
+    """
+    ✅ 쿠팡 파트너스 대가성 문구를 '무조건 최상단'에 삽입
+    - 이미지/제목/요약박스보다 위에 먼저 나오게 함
+    - (쿠팡 위반 방지 목적)
+    """
+
+    disclosure = """
+<div style="
+  font-size:13px;
+  line-height:1.6;
+  color:#666;
+  background:#f7f7f7;
+  border:1px solid #e6e6e6;
+  border-radius:10px;
+  padding:10px 12px;
+  margin:0 0 18px;
+">
+  이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.
+</div>
+""".strip()
+
+    # ✅ 이미 포함되어 있으면 중복 삽입 방지
+    if "쿠팡 파트너스 활동의 일환" in html:
         return html
 
-    # 첫 번째 h2 앞에 1회 + 하단 1회
-    idx = html.find("<h2")
-    if idx != -1:
-        html = html[:idx] + box + "\n" + html[idx:]
-    return html + "\n" + box
+    # ✅ 무조건 최상단에 붙이기
+    return disclosure + "\n" + (html or "")
