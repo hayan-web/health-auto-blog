@@ -261,6 +261,7 @@ def upload_media_to_wp(image_bytes: bytes, filename: str) -> tuple[str, int]:
     415 방지: multipart(files=) 대신 RAW binary + headers 방식 업로드
     반환: (source_url, media_id)
     """
+    filename = force_ascii(filename)
     media_endpoint = f"{WP_URL}/wp-json/wp/v2/media"
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
