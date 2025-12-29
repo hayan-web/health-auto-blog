@@ -15,12 +15,19 @@ import textwrap
 # =========================
 # 0) ENV
 # =========================
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+from app.config import Settings
 
-WP_URL = os.getenv("WP_URL", "").strip().rstrip("/")
-WP_USER = os.getenv("WP_USERNAME", "").strip()
-WP_PW = os.getenv("WP_APP_PASSWORD", "").strip().replace(" ", "")
+S = Settings()
+
+OPENAI_API_KEY = S.OPENAI_API_KEY
+GOOGLE_API_KEY = S.GOOGLE_API_KEY
+
+WP_URL = S.WP_URL
+WP_USER = S.WP_USERNAME
+WP_PW = S.WP_APP_PASSWORD
+
+OPENAI_MODEL = S.OPENAI_MODEL
+GEMINI_IMAGE_MODEL = S.GEMINI_IMAGE_MODEL
 
 if not OPENAI_API_KEY:
     print("❌ OPENAI_API_KEY 누락")
