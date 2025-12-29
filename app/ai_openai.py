@@ -19,8 +19,9 @@ def make_openai_client(openai_api_key: str) -> OpenAI:
 def generate_blog_post(
     client: OpenAI,
     model: str,
+    keyword: str,
 ) -> dict:
-    prompt = """
+    prompt = f"""
 당신은 한국어 블로그 글 작성 도우미입니다.
 
 아래 형식의 JSON "객체(Object)" 로만 응답하세요.
@@ -28,11 +29,11 @@ def generate_blog_post(
 - JSON 외 텍스트(설명/코드펜스/추가문장) 금지
 
 출력 형식(키 3개 고정):
-{
+{{
   "title": "제목",
   "content": "본문(문단은 \\n\\n 로 구분)",
   "img_prompt": "대표 이미지 생성용 프롬프트(영문 권장)"
-}
+}}
 
 작성 규칙:
 - 제목 40~60자
@@ -41,14 +42,21 @@ def generate_blog_post(
 - 문단은 \\n\\n 로 나눠 작성
 - 마지막에 “참고하면 좋은 습관 3가지” 소제목 + 체크리스트 정리
 
-주제:
-40~50대에게 도움이 되는 건강관리 및 생활습관 실천 가이드
+타겟:
+- 40~50대 한국 독자
+
+이번 글의 핵심 키워드(주제):
+- {keyword}
+
+요청:
+- 위 키워드를 중심으로 “실천 가능한 건강관리/생활습관” 글을 작성하세요.
+- 이미지 프롬프트는 1:1 썸네일에 어울리는 ‘한 장면’ 일러스트로 작성(텍스트 없음).
 """
 
     last_err = None
     for attempt in range(1, 3):
         try:
-            print(f"🧠 OpenAI 글 생성 시도: {model} (attempt {attempt})")
+            print(f"🧠 OpenAI 글 생성 시도: {model} (attempt {attempt}) / 키워드: {keyword}")
             resp = client.responses.create(model=model, input=prompt)
             text = _strip_code_fence(resp.output_text)
             data = json.loads(text)
@@ -62,9 +70,11 @@ def generate_blog_post(
             if not data.get("img_prompt"):
                 data["img_prompt"] = (
                     "health lifestyle illustration, korean middle-aged audience, "
-                    "clean minimal, soft light, no text, watercolor, high clarity"
+                    "clean minimal, soft light, single scene, no text"
                 )
 
+            # 키워드도 같이 보관(나중에 state에 저장)
+            data["keyword"] = keyword
             return data
         except Exception as e:
             last_err = e
