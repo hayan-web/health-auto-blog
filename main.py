@@ -39,46 +39,56 @@ def _strip_code_fence(text: str) -> str:
 
 
 def generate_blog():
-    system_instruction = """
+    prompt = """
 당신은 한국어 블로그 글 작성 도우미입니다.
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 금지.
 
+아래 조건을 반드시 지키세요.
+- 반드시 JSON 형식으로만 응답하세요
+- JSON 외의 텍스트는 절대 출력하지 마세요
+
+출력 형식:
 {
   "title": "제목",
   "content": "본문(문단은 \\n\\n 로 구분)",
   "img_prompt": "대표 이미지 생성용 프롬프트(영문 권장)"
 }
 
-규칙:
+작성 규칙:
 - 제목은 40~60자 내외
-- 본문은 소제목 포함, 1200~2000자 정도
-- 과장/허위 금지, 지나친 의학적 단정 금지(일반 정보 수준)
-- 문단은 \\n\\n 로 나눠서 반환
+- 본문은 소제목 포함, 1200~2000자
+- 과장/허위/의학적 단정 금지 (일반 정보 수준)
+- 문단은 \\n\\n 로 나눠서 작성
+
+주제:
+40~50대에게 도움이 되는 건강 블로그 글 1편 작성
 """
 
-    user_prompt = "40~50대에게 도움이 되는 건강 블로그 글을 1편 작성해 주세요."
-
     last_err = None
+
     for model_name in MODEL_CANDIDATES:
         try:
             print(f"🧠 Gemini 모델 시도: {model_name}")
             model = genai.GenerativeModel(model_name)
 
             response = model.generate_content(
-                user_prompt,
-                generation_config={"response_mime_type": "application/json"},
-                system_instruction=system_instruction,
+                prompt,
+                generation_config={
+                    "response_mime_type": "application/json"
+                }
             )
 
-            text = _strip_code_fence(response.text)
+            text = (response.text or "").strip()
+
+            if text.startswith("```"):
+                text = text.strip("`").replace("json", "", 1).strip()
+
             data = json.loads(text)
 
-            # 최소 검증
             if not data.get("title") or not data.get("content"):
-                raise ValueError("JSON에 title/content가 비어있습니다.")
+                raise ValueError("JSON 필수 필드 누락")
 
             if not data.get("img_prompt"):
-                data["img_prompt"] = "health blog illustration, clean minimal, soft light, watercolor style"
+                data["img_prompt"] = "health blog illustration, clean minimal, watercolor style"
 
             return data
 
