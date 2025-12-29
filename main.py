@@ -1,4 +1,5 @@
-import uuid
+from app.wp_client import upload_media_to_wp, publish_to_wp
+import 
 import os
 import json
 import re
@@ -263,35 +264,6 @@ def add_title_to_image(image_bytes: bytes, title: str) -> bytes:
 # =========================
 # 5) WordPress: Media Upload (RAW binary) + Post Publish
 # =========================
-def upload_media_to_wp(image_bytes: bytes, filename: str) -> tuple[str, int]:
-    """
-    415 방지: multipart(files=) 대신 RAW binary + headers 방식 업로드
-    반환: (source_url, media_id)
-    """
-    filename = force_ascii(filename)
-    media_endpoint = f"{WP_URL}/wp-json/wp/v2/media"
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": "image/png",
-    }
-
-    res = requests.post(
-        media_endpoint,
-        auth=(WP_USER, WP_PW),
-        headers=headers,
-        data=image_bytes,
-        timeout=60,
-    )
-
-    print("🖼️ WP media status:", res.status_code)
-    print("🖼️ WP media resp:", (res.text or "")[:300])
-
-    if res.status_code not in (200, 201):
-        raise RuntimeError(f"미디어 업로드 실패: {res.status_code} / {res.text}")
-
-    j = res.json()
-    return j["source_url"], j["id"]
-
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     """
     헤더에 넣어도 안전한 ASCII 파일명 생성 (한글/특수문자 절대 없음)
@@ -308,22 +280,6 @@ def force_ascii(s: str) -> str:
     혹시라도 남아있는 비ASCII 제거
     """
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", (s or "file")).strip("-") or "file"
-
-
-def publish_to_wp(data: dict, hero_url: str, body_url: str, featured_media_id: int) -> int:
-    """
-    - 이미지 2장: 맨 위 1장 + 본문 중간 1장
-    - featured_media 지정
-    반환: post_id
-    """
-    # 문단 분리(빈 줄 기준)
-    raw_paras = [p.strip() for p in data["content"].split("\n") if p.strip()]
-
-    # 중간 삽입 위치(대략 절반)
-    mid_idx = max(1, len(raw_paras) // 2)
-
-    def ptag(p: str) -> str:
-        return f"<p style='margin-bottom:1.6em; font-size:18px; color:#333;'>{p}</p>"
 
     top_html = f"""
 <div style="margin-bottom:28px;">
@@ -402,11 +358,14 @@ if __name__ == "__main__":
         hero_name = make_ascii_filename("featured")
         body_name = make_ascii_filename("body")
         
-        hero_url, hero_media_id = upload_media_to_wp(hero_img_titled, hero_name)
-        body_url, _ = upload_media_to_wp(body_img, body_name)
-
-        # 6) 글 발행 + featured_media 지정 + 이미지 2장 삽입
-        post_id = publish_to_wp(post, hero_url, body_url, featured_media_id=hero_media_id)
+        hero_url, hero_media_id = upload_media_to_wp(WP_URL, WP_USER, WP_PW, hero_img_titled, hero_name)
+        body_url, _ = upload_media_to_wp(WP_URL, WP_USER, WP_PW, body_img, body_name)
+        
+        post_id = publish_to_wp(
+            WP_URL, WP_USER, WP_PW,
+            post, hero_url, body_url,
+            featured_media_id=hero_media_id
+        )
 
         print(f"✅ 완료! post_id={post_id}")
 
