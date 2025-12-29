@@ -14,7 +14,7 @@ from app.ai_gemini_image import (
 from app.thumb_overlay import to_square_1024, add_title_to_image
 from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
-from app.dedupe import pick_retry_reason
+from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
 
 
@@ -22,6 +22,7 @@ from app.keyword_picker import pick_keyword_by_naver
 # Settings 인스턴스 (필수)
 # =========================
 S = Settings()
+
 
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     """
@@ -42,38 +43,37 @@ def run() -> None:
     openai_client = make_openai_client(S.OPENAI_API_KEY)
     gemini_client = make_gemini_client(S.GOOGLE_API_KEY)
 
-# 2) 중복 방지용 state 로드
-state = load_state()
-history = state.get("history", [])
+    # 2) 중복 방지용 state 로드
+    state = load_state()
+    history = state.get("history", [])
 
-# ✅ 2.5) 네이버 기반 키워드 선정
-keyword, debug = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
-print("🔎 선택된 키워드:", keyword)
-print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
+    # ✅ 2.5) 네이버 기반 키워드 선정
+    keyword, debug = pick_keyword_by_naver(
+        S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history
+    )
+    print("🔎 선택된 키워드:", keyword)
+    print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
 
-# 3) 글 생성(OpenAI) + 중복 회피
-MAX_RETRY = 3
-post = None
+    # 3) 글 생성(OpenAI) + 중복 회피
+    MAX_RETRY = 3
+    post = None
 
-for i in range(1, MAX_RETRY + 1):
-    candidate = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+    for i in range(1, MAX_RETRY + 1):
+        candidate = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
 
-    dup, reason = pick_retry_reason(candidate.get("title", ""), history)
-    if dup:
-        print(f"♻️ 중복 감지({reason}) → 재생성 {i}/{MAX_RETRY}")
-        continue
+        dup, reason = pick_retry_reason(candidate.get("title", ""), history)
+        if dup:
+            print(f"♻️ 중복 감지({reason}) → 재생성 {i}/{MAX_RETRY}")
+            continue
 
-    post = candidate
-    break
+        post = candidate
+        break
 
-if not post:
-    raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
-
+    if not post:
+        raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
 
     # 4) 썸네일용 짧은 타이틀
-    thumb_title = generate_thumbnail_title(
-        openai_client, S.OPENAI_MODEL, post["title"]
-    )
+    thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 썸네일 타이틀:", thumb_title)
 
     # 5) 이미지 2장 생성 (Gemini NanoBanana)
@@ -124,17 +124,14 @@ if not post:
         state,
         {
             "post_id": post_id,
-            "keyword": post.get("keyword", ""),
+            "keyword": post.get("keyword", keyword),
             "title": post["title"],
-            "title_fp": __import__(
-                "app.dedupe", fromlist=["_title_fingerprint"]
-            )._title_fingerprint(post["title"]),
+            "title_fp": _title_fingerprint(post["title"]),
         },
     )
     save_state(state)
 
     print(f"✅ 발행 완료! post_id={post_id}")
-
 
 
 if __name__ == "__main__":
