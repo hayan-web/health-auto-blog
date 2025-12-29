@@ -13,6 +13,7 @@ from google.genai import types
 
 from app.config import Settings
 from app.wp_client import upload_media_to_wp, publish_to_wp
+from app.ai_openai import make_openai_client, generate_blog_post, generate_thumbnail_title
 
 S = Settings()
 
@@ -38,7 +39,7 @@ if not (WP_URL and WP_USER and WP_PW):
     print("❌ WP_URL / WP_USERNAME / WP_APP_PASSWORD 중 누락")
     raise SystemExit(1)
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = make_openai_client(OPENAI_API_KEY)
 gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
 
 OPENAI_MODEL = "gpt-5-mini"
@@ -48,14 +49,6 @@ GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 # =========================
 # 1) Helpers
 # =========================
-def _strip_code_fence(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
-
 
 def _safe_slug_filename(name: str, fallback: str) -> str:
     s = (name or "").strip()
@@ -63,86 +56,6 @@ def _safe_slug_filename(name: str, fallback: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9가-힣\-_]", "", s)
     s = s[:60].strip("-") or fallback
     return s
-
-
-# =========================
-# 2) OpenAI (글 생성)
-# =========================
-def generate_blog_post() -> dict:
-    prompt = """
-당신은 한국어 블로그 글 작성 도우미입니다.
-
-아래 형식의 JSON "객체(Object)" 로만 응답하세요.
-- JSON 배열([]) 금지
-- JSON 외 텍스트(설명/코드펜스/추가문장) 금지
-
-출력 형식(키 3개 고정):
-{
-  "title": "제목",
-  "content": "본문(문단은 \\n\\n 로 구분)",
-  "img_prompt": "대표 이미지 생성용 프롬프트(영문 권장)"
-}
-
-작성 규칙:
-- 제목 40~60자
-- 본문 1500자 전후(±20%), 소제목 포함
-- 과장/허위/의학적 단정 금지(일반 정보 수준)
-- 문단은 \\n\\n 로 나눠 작성
-- 마지막에 “참고하면 좋은 습관 3가지” 소제목 + 체크리스트 정리
-
-주제:
-40~50대에게 도움이 되는 건강관리 및 생활습관 실천 가이드
-"""
-
-    last_err = None
-    for attempt in range(1, 3):
-        try:
-            print(f"🧠 OpenAI 글 생성 시도: {OPENAI_MODEL} (attempt {attempt})")
-            resp = openai_client.responses.create(model=OPENAI_MODEL, input=prompt)
-            text = _strip_code_fence(resp.output_text)
-            data = json.loads(text)
-
-            if not isinstance(data, dict):
-                raise ValueError(f"JSON이 객체가 아닙니다: {type(data)}")
-
-            if not data.get("title") or not data.get("content"):
-                raise ValueError("JSON 필수 필드(title/content) 누락")
-
-            if not data.get("img_prompt"):
-                data["img_prompt"] = (
-                    "health lifestyle illustration, korean middle-aged audience, "
-                    "clean minimal, soft light, no text, watercolor, high clarity"
-                )
-
-            return data
-        except Exception as e:
-            last_err = e
-            print(f"⚠️ OpenAI 글 생성 실패 (attempt {attempt}): {e}")
-
-    raise RuntimeError(f"OpenAI 글 생성 최종 실패: {last_err}")
-
-
-def generate_thumbnail_title(full_title: str) -> str:
-    prompt = f"""
-아래 블로그 제목을 보고,
-썸네일 이미지에 넣을 짧은 제목을 만들어주세요.
-
-조건:
-- 10~16자 이내
-- 핵심 키워드만 남기기
-- 조사/부사 최소화
-- 감탄사, 특수문자 금지
-- 출력은 텍스트 한 줄만
-
-원제목:
-{full_title}
-"""
-    resp = openai_client.responses.create(model=OPENAI_MODEL, input=prompt)
-    t = (resp.output_text or "").strip()
-    t = re.sub(r"[\r\n]+", " ", t).strip()
-    # 혹시 너무 길면 강제 컷(안전)
-    return t[:18].strip()
-
 
 # =========================
 # 3) Gemini NanoBanana (이미지 생성)
@@ -353,10 +266,10 @@ def force_ascii(s: str) -> str:
 if __name__ == "__main__":
     try:
         # 1) 글 생성 (OpenAI)
-        post = generate_blog_post()
+        post = generate_blog_post(openai_client, OPENAI_MODEL)
 
         # 2) 썸네일용 짧은 타이틀 (OpenAI)
-        thumb_title = generate_thumbnail_title(post["title"])
+        thumb_title = generate_thumbnail_title(openai_client, OPENAI_MODEL, post["title"])
         print("🏷️ 썸네일 타이틀:", thumb_title)
 
         # 3) 이미지 2장 생성 (Gemini NanoBanana)
