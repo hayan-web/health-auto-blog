@@ -22,3 +22,9 @@ class Settings:
     # Models
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
     GEMINI_IMAGE_MODEL: str = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip() or "gemini-2.5-flash-image"
+    
+    NAVER_CLIENT_ID: str
+    NAVER_CLIENT_SECRET: str
+
+
+
