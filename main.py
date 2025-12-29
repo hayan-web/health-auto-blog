@@ -100,6 +100,20 @@ if not post:
     )
 
     print(f"✅ 발행 완료! post_id={post_id}")
+    
+    # ✅ 히스토리 저장(중복 방지)
+state = add_history_item(
+    state,
+    {
+        "post_id": post_id,
+        "title": post["title"],
+        "title_fp": __import__("app.dedupe", fromlist=["_title_fingerprint"])._title_fingerprint(post["title"]),
+    },
+    max_items=200,
+)
+save_state(state)
+print("🧠 히스토리 저장 완료")
+
 
 
 if __name__ == "__main__":
