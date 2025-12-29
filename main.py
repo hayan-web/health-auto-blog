@@ -17,6 +17,11 @@ from app.store import load_state, save_state, add_history_item
 from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
 
+# ✅ 추가(문단 스타일/수익화)
+from app.formatter import format_post_body
+from app.monetize_adsense import inject_ads
+from app.monetize_coupang import inject_coupang
+
 
 # =========================
 # Settings 인스턴스 (필수)
@@ -86,7 +91,7 @@ def run() -> None:
     body_img = generate_nanobanana_image_png_bytes(
         gemini_client,
         S.GEMINI_IMAGE_MODEL,
-        post["img_prompt"] + ", different composition, different angle, no text",
+        post["img_prompt"] + ", single scene, no collage, different composition, different angle, no text, square 1:1",
     )
 
     # 6) 1:1 고정
@@ -107,10 +112,35 @@ def run() -> None:
     body_url, _ = upload_media_to_wp(
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
-    
-from app.formatter import format_post_body
-from app.monetize_adsense import inject_ads
-from app.monetize_coupang import inject_coupang
+
+    # ==========================================================
+    # ✅ 8.5) 본문 스타일 적용 + 쿠팡/애드센스 삽입 (발행 전에!)
+    # - generate_blog_post()가 intro/sections/outro를 주면 그대로 사용
+    # - 아니면 content만 있는 경우 대비로 fallback 처리
+    # ==========================================================
+    if post.get("sections"):
+        styled_html = format_post_body(
+            title=post["title"],
+            intro=post.get("intro", ""),
+            sections=post.get("sections", []),
+            outro=post.get("outro", ""),
+            disclaimer="의학적 진단이 아닌 일반 정보입니다. 증상이 지속되면 전문가 상담을 권장드립니다.",
+        )
+    else:
+        # fallback: content 단일 문자열일 때
+        raw = post.get("content", "") or post.get("body", "") or ""
+        styled_html = f"""
+        <p style="margin:0 0 14px; font-size:17px; line-height:1.75; letter-spacing:-0.2px;">{raw}</p>
+        """.strip()
+
+    # ✅ 쿠팡 박스 삽입(키워드 기반)
+    styled_html = inject_coupang(styled_html, keyword)
+
+    # ✅ 애드센스 블록 삽입(ENV에 설정된 경우만)
+    styled_html = inject_ads(styled_html)
+
+    # ✅ publish_to_wp가 content_html을 우선 사용하도록 해둔 상태라면 이걸로 본문 교체됨
+    post["content_html"] = styled_html
 
     # 9) WP 글 발행
     post_id = publish_to_wp(
