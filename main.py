@@ -149,12 +149,15 @@ def generate_thumbnail_title(full_title: str) -> str:
 # =========================
 def generate_nanobanana_image_png_bytes(prompt: str) -> bytes:
     img_prompt = f"""
-Create a blog-friendly illustration.
-Constraints:
-- clean minimal composition
-- soft light
-- high clarity
+Create ONE single scene illustration for a blog thumbnail.
+Hard constraints:
+- square (1:1)
+- SINGLE scene, SINGLE frame
+- NO collage, NO triptych, NO split panels, NO multiple images
+- NO grid, NO montage, NO storyboard
+- centered subject, clean background
 - no text, no watermark, no logo
+Style: clean minimal, soft light, high clarity
 Prompt: {prompt}
 """
 
@@ -202,12 +205,11 @@ Prompt: {prompt}
 # 4) Thumbnail 텍스트 오버레이
 # =========================
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    # GitHub Actions(ubuntu)에서 자주 있는 폰트 경로들
     font_candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
     ]
     for path in font_candidates:
         try:
@@ -254,6 +256,25 @@ def add_title_to_image(image_bytes: bytes, title: str) -> bytes:
 
     out = BytesIO()
     img.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+    
+from PIL import Image
+from io import BytesIO
+
+def to_square_1024(image_bytes: bytes) -> bytes:
+    """
+    어떤 비율로 오든 중앙 기준으로 정사각 크롭 후 1024x1024로 고정
+    """
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    w, h = img.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    img = img.crop((left, top, left + side, top + side))
+    img = img.resize((1024, 1024), Image.LANCZOS)
+
+    out = BytesIO()
+    img.save(out, format="PNG")
     return out.getvalue()
 
 
@@ -346,9 +367,18 @@ if __name__ == "__main__":
         body_img = generate_nanobanana_image_png_bytes(
             post["img_prompt"] + ", different composition, different angle, no text"
         )
+        
+        # ✅ 이미지 생성 직후 무조건 1:1 정사각 고정
+        hero_img = to_square_1024(hero_img)
+        body_img = to_square_1024(body_img)
+
 
         # 4) 대표 이미지에 타이틀 오버레이
         hero_img_titled = add_title_to_image(hero_img, thumb_title)
+
+        # ✅ 오버레이 후에도 혹시 비율 깨질 수 있으니 다시 1:1 고정
+        hero_img_titled = to_square_1024(hero_img_titled)
+
 
         # 5) WP 미디어 업로드(대표/중간)
         hero_name = make_ascii_filename("featured")
