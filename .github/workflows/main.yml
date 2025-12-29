@@ -36,6 +36,9 @@ jobs:
 
       - name: Run script
         env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           WP_URL: ${{ secrets.WP_URL }}
