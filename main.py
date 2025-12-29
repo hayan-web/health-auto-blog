@@ -391,12 +391,11 @@ if __name__ == "__main__":
         hero_img_titled = add_title_to_image(hero_img, thumb_title)
 
         # 5) WP 미디어 업로드(대표/중간)
-hero_name = make_ascii_filename("featured")
-body_name = make_ascii_filename("body")
-
-hero_url, hero_media_id = upload_media_to_wp(hero_img_titled, hero_name)
-body_url, _ = upload_media_to_wp(body_img, body_name)
-
+        hero_name = make_ascii_filename("featured")
+        body_name = make_ascii_filename("body")
+        
+        hero_url, hero_media_id = upload_media_to_wp(hero_img_titled, hero_name)
+        body_url, _ = upload_media_to_wp(body_img, body_name)
 
         # 6) 글 발행 + featured_media 지정 + 이미지 2장 삽입
         post_id = publish_to_wp(post, hero_url, body_url, featured_media_id=hero_media_id)
