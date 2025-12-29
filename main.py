@@ -116,17 +116,27 @@ def run() -> None:
 
     # ==========================================================
     # ✅ 8.5) 본문 스타일 적용 + 쿠팡/애드센스 삽입 (발행 전에!)
-    # - generate_blog_post()가 intro/sections/outro를 주면 그대로 사용
-    # - 아니면 content만 있는 경우 대비로 fallback 처리
     # ==========================================================
-    if post.get("sections"):
-        styled_html = format_post_body(
-            title=post["title"],
-            intro=post.get("intro", ""),
-            sections=post.get("sections", []),
-            outro=post.get("outro", ""),
-            disclaimer="의학적 진단이 아닌 일반 정보입니다. 증상이 지속되면 전문가 상담을 권장드립니다.",
-        )
+    styled_html = format_post_body(
+        title=post["title"],
+        hero_url=hero_url,
+        body_url=body_url,
+        intro=post.get("intro", ""),
+        sections=post.get("sections", []),
+        outro=post.get("outro", ""),
+        disclaimer="의학적 진단이 아닌 일반 정보입니다. 증상이 지속되면 전문가 상담을 권장드립니다.",
+    )
+
+    # ✅ 쿠팡(대가성 문구 포함) = 무조건 최상단 삽입
+    styled_html = inject_coupang(styled_html, keyword)
+
+    # ✅ 애드센스 (있으면 삽입)
+    styled_html = inject_ads(styled_html)
+
+    # ✅ publish_to_wp()가 content_html을 우선 사용하도록 수정했으니,
+    # 여기 넣으면 그대로 스타일 적용되어 발행됨
+    post["content_html"] = styled_html
+
     else:
         # fallback: content 단일 문자열일 때
         raw = (post.get("content") or post.get("body") or "").strip()
