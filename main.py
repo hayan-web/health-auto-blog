@@ -29,34 +29,35 @@ def run() -> None:
     openai_client = make_openai_client(S.OPENAI_API_KEY)
     gemini_client = make_gemini_client(S.GOOGLE_API_KEY)
 
-    # 2) 글 생성(OpenAI)
-    post = generate_blog_post(openai_client, S.OPENAI_MODEL)
+    # 2) 중복 방지용 state 로드 (⭐ 반드시 여기!)
     state = load_state()
-history = state.get("history", [])
+    history = state.get("history", [])
 
-MAX_RETRY = 3
-post = None
+    # 3) 글 생성(OpenAI) + 중복 회피
+    MAX_RETRY = 3
+    post = None
 
-for i in range(1, MAX_RETRY + 1):
-    candidate = generate_blog_post(openai_client, S.OPENAI_MODEL)
+    for i in range(1, MAX_RETRY + 1):
+        candidate = generate_blog_post(openai_client, S.OPENAI_MODEL)
 
-    dup, reason = pick_retry_reason(candidate.get("title", ""), history)
-    if dup:
-        print(f"♻️ 중복 감지({reason}) → 재생성 {i}/{MAX_RETRY}")
-        continue
+        dup, reason = pick_retry_reason(candidate.get("title", ""), history)
+        if dup:
+            print(f"♻️ 중복 감지({reason}) → 재생성 {i}/{MAX_RETRY}")
+            continue
 
-    post = candidate
-    break
+        post = candidate
+        break
 
-if not post:
-    raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
+    if not post:
+        raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
 
-
-    # 3) 썸네일 짧은 타이틀(OpenAI)
-    thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
+    # 4) 썸네일용 짧은 타이틀
+    thumb_title = generate_thumbnail_title(
+        openai_client, S.OPENAI_MODEL, post["title"]
+    )
     print("🧩 썸네일 타이틀:", thumb_title)
 
-    # 4) 이미지 2장 생성(Gemini NanoBanana)
+    # 5) 이미지 2장 생성 (Gemini NanoBanana)
     print("🎨 Gemini 이미지(상단/대표) 생성 중...")
     hero_img = generate_nanobanana_image_png_bytes(
         gemini_client, S.GEMINI_IMAGE_MODEL, post["img_prompt"]
@@ -69,15 +70,15 @@ if not post:
         post["img_prompt"] + ", different composition, different angle, no text",
     )
 
-    # 5) 무조건 1:1 고정
+    # 6) 1:1 고정
     hero_img = to_square_1024(hero_img)
     body_img = to_square_1024(body_img)
 
-    # 6) 대표 이미지에 타이틀 오버레이 후 다시 1:1 고정
+    # 7) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
     hero_img_titled = to_square_1024(hero_img_titled)
 
-    # 7) WP 미디어 업로드(대표/중간)
+    # 8) WP 미디어 업로드
     hero_name = make_ascii_filename("featured")
     body_name = make_ascii_filename("body")
 
@@ -88,7 +89,7 @@ if not post:
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
 
-    # 8) WP 글 발행(상단 1장 + 중간 1장, featured 지정)
+    # 9) WP 글 발행
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -99,20 +100,20 @@ if not post:
         featured_media_id=hero_media_id,
     )
 
+    # 10) 히스토리 저장
+    state = add_history_item(
+        state,
+        {
+            "post_id": post_id,
+            "title": post["title"],
+            "title_fp": __import__(
+                "app.dedupe", fromlist=["_title_fingerprint"]
+            )._title_fingerprint(post["title"]),
+        },
+    )
+    save_state(state)
+
     print(f"✅ 발행 완료! post_id={post_id}")
-    
-    # ✅ 히스토리 저장(중복 방지)
-state = add_history_item(
-    state,
-    {
-        "post_id": post_id,
-        "title": post["title"],
-        "title_fp": __import__("app.dedupe", fromlist=["_title_fingerprint"])._title_fingerprint(post["title"]),
-    },
-    max_items=200,
-)
-save_state(state)
-print("🧠 히스토리 저장 완료")
 
 
 
