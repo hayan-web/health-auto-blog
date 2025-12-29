@@ -26,6 +26,14 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            wp-state-${{ github.repository }}-
+
       - name: Run script
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -34,5 +42,14 @@ jobs:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: python main.py
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+
+
 
 
