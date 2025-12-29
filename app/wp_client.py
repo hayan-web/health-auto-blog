@@ -9,10 +9,6 @@ def upload_media_to_wp(
     filename: str,
     timeout: int = 60,
 ) -> tuple[str, int]:
-    """
-    WP 미디어 업로드 (RAW binary + headers 방식: 415 방지)
-    반환: (source_url, media_id)
-    """
     wp_url = wp_url.rstrip("/")
     media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
 
@@ -50,20 +46,18 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    - 이미지 2장: 맨 위 1장 + 본문 중간 1장
-    - featured_media 지정
-    - ✅ data["content_html"]가 있으면 그걸 최우선으로 발행
-    반환: post_id
+    ✅ 핵심 변경:
+    - data["content_html"]가 있으면 그걸 그대로 content로 사용 (스타일 적용됨)
+    - 없을 때만 fallback으로 기존 단순 조립
     """
     wp_url = wp_url.rstrip("/")
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    # ✅ 1) 스타일 적용된 HTML이 있으면 그대로 사용
-    content_html = (data.get("content_html") or "").strip()
-    if content_html:
-        final_html = content_html
+    # ✅ 1) content_html 우선
+    if data.get("content_html"):
+        final_html = data["content_html"]
     else:
-        # ✅ 2) fallback: content를 문단으로 쪼개 기존 방식 유지
+        # fallback: 최소한의 기본 구성 (예전 방식)
         raw_paras = [p.strip() for p in (data.get("content") or "").split("\n") if p.strip()]
         if not raw_paras:
             raise RuntimeError("본문(content)이 비어 있습니다.")
@@ -78,18 +72,16 @@ def publish_to_wp(
   <img src="{hero_url}" alt="{data.get("title","")}" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.14);" />
 </div>
 """
-
         mid_img_html = f"""
 <div style="margin:28px 0;">
   <img src="{body_url}" alt="{data.get("title","")} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.12);" />
 </div>
 """
-
         body_parts = []
-        for i, p in enumerate(raw_paras):
+        for i, ptxt in enumerate(raw_paras):
             if i == mid_idx:
                 body_parts.append(mid_img_html)
-            body_parts.append(ptag(p))
+            body_parts.append(ptag(ptxt))
 
         final_html = f"""
 {top_html}
