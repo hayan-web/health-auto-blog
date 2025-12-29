@@ -50,58 +50,38 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    - content_html이 있으면 그대로 사용 (스타일/광고/쿠팡 반영)
-    - 없으면 기존 자동 문단 방식으로 fallback
     - 이미지 2장: 맨 위 1장 + 본문 중간 1장
     - featured_media 지정
+    - ✅ data["content_html"]가 있으면 그걸 최우선으로 발행
     반환: post_id
     """
     wp_url = wp_url.rstrip("/")
+    api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    # ==========================================================
-    # 1) 우선순위: content_html (스타일/광고/쿠팡 적용된 경우)
-    # ==========================================================
-    if data.get("content_html"):
-        final_html = f"""
-<div style="margin-bottom:28px;">
-  <img src="{hero_url}" alt="{data.get("title","")}"
-       style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.14);" />
-</div>
-
-{data["content_html"]}
-"""
+    # ✅ 1) 스타일 적용된 HTML이 있으면 그대로 사용
+    content_html = (data.get("content_html") or "").strip()
+    if content_html:
+        final_html = content_html
     else:
-        # ======================================================
-        # 2) fallback: 기존 content 기반 자동 문단 처리
-        # ======================================================
-        raw_paras = [
-            p.strip()
-            for p in (data.get("content") or "").split("\n")
-            if p.strip()
-        ]
+        # ✅ 2) fallback: content를 문단으로 쪼개 기존 방식 유지
+        raw_paras = [p.strip() for p in (data.get("content") or "").split("\n") if p.strip()]
         if not raw_paras:
             raise RuntimeError("본문(content)이 비어 있습니다.")
 
         mid_idx = max(1, len(raw_paras) // 2)
 
         def ptag(p: str) -> str:
-            return (
-                "<p style='margin-bottom:1.6em; "
-                "font-size:18px; color:#333;'>"
-                f"{p}</p>"
-            )
+            return f"<p style='margin-bottom:1.6em; font-size:18px; color:#333;'>{p}</p>"
 
         top_html = f"""
 <div style="margin-bottom:28px;">
-  <img src="{hero_url}" alt="{data.get("title","")}"
-       style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.14);" />
+  <img src="{hero_url}" alt="{data.get("title","")}" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.14);" />
 </div>
 """
 
         mid_img_html = f"""
 <div style="margin:28px 0;">
-  <img src="{body_url}" alt="{data.get("title","")} 관련 이미지"
-       style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.12);" />
+  <img src="{body_url}" alt="{data.get("title","")} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.12);" />
 </div>
 """
 
@@ -118,10 +98,6 @@ def publish_to_wp(
 </div>
 """
 
-    # ==========================================================
-    # 3) 워드프레스 글 발행
-    # ==========================================================
-    api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
     payload = {
         "title": data.get("title", ""),
         "content": final_html,
@@ -132,19 +108,11 @@ def publish_to_wp(
     print("📝 POST ->", api_endpoint)
     print("📝 title ->", (payload["title"] or "")[:80])
 
-    res = requests.post(
-        api_endpoint,
-        auth=(wp_user, wp_pw),
-        json=payload,
-        timeout=timeout,
-    )
-
+    res = requests.post(api_endpoint, auth=(wp_user, wp_pw), json=payload, timeout=timeout)
     print("📝 WP status:", res.status_code)
     print("📝 WP resp:", (res.text or "")[:500])
 
     if res.status_code != 201:
-        raise RuntimeError(
-            f"워드프레스 글 발행 실패: {res.status_code} / {res.text}"
-        )
+        raise RuntimeError(f"워드프레스 글 발행 실패: {res.status_code} / {res.text}")
 
     return res.json()["id"]
