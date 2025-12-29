@@ -1,22 +1,18 @@
-from app.wp_client import upload_media_to_wp, publish_to_wp
-import 
 import os
-import json
 import re
+import json
+import uuid
+import textwrap
 from io import BytesIO
 
+from PIL import Image, ImageDraw, ImageFont
 import requests
 from openai import OpenAI
 from google import genai
 from google.genai import types
-from PIL import Image, ImageDraw, ImageFont
-import textwrap
 
-
-# =========================
-# 0) ENV
-# =========================
 from app.config import Settings
+from app.wp_client import upload_media_to_wp, publish_to_wp
 
 S = Settings()
 
