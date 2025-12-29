@@ -107,6 +107,10 @@ def run() -> None:
     body_url, _ = upload_media_to_wp(
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
+    
+from app.formatter import format_post_body
+from app.monetize_adsense import inject_ads
+from app.monetize_coupang import inject_coupang
 
     # 9) WP 글 발행
     post_id = publish_to_wp(
