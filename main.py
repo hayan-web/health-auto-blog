@@ -1,3 +1,4 @@
+import uuid
 import os
 import json
 import re
@@ -283,6 +284,23 @@ def upload_media_to_wp(image_bytes: bytes, filename: str) -> tuple[str, int]:
     j = res.json()
     return j["source_url"], j["id"]
 
+def make_ascii_filename(prefix: str, ext: str = "png") -> str:
+    """
+    헤더에 넣어도 안전한 ASCII 파일명 생성 (한글/특수문자 절대 없음)
+    """
+    uid = uuid.uuid4().hex[:10]
+    prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
+    if not prefix:
+        prefix = "img"
+    return f"{prefix}-{uid}.{ext}"
+
+
+def force_ascii(s: str) -> str:
+    """
+    혹시라도 남아있는 비ASCII 제거
+    """
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", (s or "file")).strip("-") or "file"
+
 
 def publish_to_wp(data: dict, hero_url: str, body_url: str, featured_media_id: int) -> int:
     """
@@ -373,9 +391,12 @@ if __name__ == "__main__":
         hero_img_titled = add_title_to_image(hero_img, thumb_title)
 
         # 5) WP 미디어 업로드(대표/중간)
-        safe_base = _safe_slug_filename(post["title"], "post")
-        hero_url, hero_media_id = upload_media_to_wp(hero_img_titled, f"{safe_base}-featured.png")
-        body_url, _body_media_id = upload_media_to_wp(body_img, f"{safe_base}-body.png")
+hero_name = make_ascii_filename("featured")
+body_name = make_ascii_filename("body")
+
+hero_url, hero_media_id = upload_media_to_wp(hero_img_titled, hero_name)
+body_url, _ = upload_media_to_wp(body_img, body_name)
+
 
         # 6) 글 발행 + featured_media 지정 + 이미지 2장 삽입
         post_id = publish_to_wp(post, hero_url, body_url, featured_media_id=hero_media_id)
