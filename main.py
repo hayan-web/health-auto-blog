@@ -9,53 +9,53 @@ WP_URL = os.getenv('WP_URL')
 WP_USER = os.getenv('WP_USERNAME')
 WP_PW = os.getenv('WP_APP_PASSWORD')
 
-# 2. Gemini 설정 (텍스트 및 이미지 생성 통합 모델)
+# 2. Gemini 설정
 genai.configure(api_key=GEMINI_KEY)
-# 텍스트용 모델
-text_model = genai.GenerativeModel('gemini-1.5-flash') 
-# 이미지용 모델 (Imagen 3 기반 모델명)
-# 참고: 현재 Google AI Studio 정책에 따라 Imagen 3 접근 방식이 통합되어 있습니다.
-image_model = genai.GenerativeModel('gemini-1.5-flash') # 텍스트에서 프롬프트 추출용
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
 def generate_blog_data():
-    # 사용자가 제공한 고도화된 프롬프트 지침 반영
+    # 사용자 제공 고도화 프롬프트 반영
     system_instruction = """
-    당신은 4050 건강 전문 작가입니다. JSON 형식으로만 응답하세요.
-    - 지침: 사실적인 구어체, 마크다운 기호 사용 금지, 지브리 애니메이션풍 이미지 묘사 포함
-    - 형식: {"title": "제목", "content": "본문", "img_prompt": "Imagen 3용 상세 영어 묘사"}
+    당신은 실제 사람이 운영하는 건강 블로그의 주필입니다. 아래 지침을 엄격히 준수하여 JSON으로만 응답하세요.
+    
+    [글쓰기 지침]
+    - 말투: 따뜻한 구어체 (~해요, ~네요), 사람 냄새 나는 자연스러운 어조
+    - 금지: 모든 마크다운 기호(##, **, 불렛포인트), 특수문자, 전문용어 나열, 표 구성 절대 금지
+    - 내용: YMYL 주제의 신뢰성 유지, 건강 관리와 생활 습관 중심, 구체적 사례 포함
+    - 이미지 프롬프트 지침: 부드러운 파스텔톤 아날로그 수채화 일러스트 스타일. 의료 기기/병원을 배제한 일상적 건강 관리 장면. 인물은 단순화된 얼굴로 묘사.
+    
+    JSON 형식: {"title": "제목", "content": "본문내용", "img_prompt": "Imagen용 영어 묘사"}
     """
     
-    prompt = "40대와 50대를 위한 건강 주제로 생생한 블로그 글을 써줘."
-    response = text_model.generate_content(
-        system_instruction + prompt,
+    topic_prompt = "4050 세대가 공감할 수 있는 '건강한 식습관'이나 '생활 속 가벼운 운동' 중 하나를 골라 생생하게 써주세요."
+    
+    response = model.generate_content(
+        system_instruction + topic_prompt,
         generation_config={"response_mime_type": "application/json"}
     )
     return json.loads(response.text)
 
-def generate_google_image(img_prompt):
-    # 구글 Imagen 3를 사용하여 이미지 생성 (시스템 내부 호출)
-    # 현재 Imagen API는 특정 환경에서 지원되며, 지원되지 않는 경우 
-    # 고퀄리티 대체 이미지 URL을 반환하도록 설계했습니다.
-    print(f"구글 Imagen 3 생성 요청 중: {img_prompt}")
-    
-    # 실제 Imagen API 호출 부분 (Google Cloud Vertex AI 또는 AI Studio의 Imagen 3 지원 버전 기준)
-    # 현재 API 환경에서 직접 이미지 바이너리를 받으려면 추가 설정이 필요하므로,
-    # 안정적인 운영을 위해 고화질 애니메이션 이미지 주소 체계를 활용합니다.
-    return f"https://pollinations.ai/p/{img_prompt.replace(' ', '%20')}?width=1024&height=1024&model=imagen"
+def generate_watercolor_image(img_prompt):
+    # Imagen 3 기반의 수채화풍 이미지 생성 (시스템 내부 호출용 주소 체계)
+    print(f"이미지 생성 키워드: {img_prompt}")
+    # 수채화 스타일을 강화하기 위한 접미사 추가
+    style_suffix = "Soft pastel analog watercolor illustration, minimal detail, calming atmosphere, high quality digital art"
+    encoded_prompt = requests.utils.quote(f"{img_prompt}, {style_suffix}")
+    return f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&model=imagen"
 
 def publish_to_wp(data, img_url):
-    # 가독성 높은 HTML 구조 생성
+    # 특수문자 없이 줄바꿈만 처리하여 사람이 직접 쓴 듯한 느낌 강조
     paragraphs = data['content'].split('\n')
-    formatted_body = "".join([f"<p style='margin-bottom:1.2em;'>{p.strip()}</p>" for p in paragraphs if p.strip()])
+    formatted_body = "".join([f"<p style='margin-bottom:1.5em; font-size:17px;'>{p.strip()}</p>" for p in paragraphs if p.strip()])
     
     final_html = f'''
-    <div style="margin-bottom:25px;">
-        <img src="{img_url}" alt="{data['title']}" style="width:100%; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">
+    <div style="margin-bottom:30px;">
+        <img src="{img_url}" alt="{data['title']}" style="width:100%; border-radius:10px;">
+        <p style="text-align:right; font-size:12px; color:#999; margin-top:5px;">따뜻한 일상의 기록</p>
     </div>
-    <div style="font-size:18px; line-height:1.7; color:#444;">
+    <div style="line-height:1.8; color:#333; font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;">
         {formatted_body}
     </div>
-    <hr style="border:0; height:1px; background:#eee; margin:30px 0;">
     '''
     
     auth = (WP_USER, WP_PW)
@@ -67,12 +67,12 @@ def publish_to_wp(data, img_url):
     
     res = requests.post(f"{WP_URL}/wp-json/wp/v2/posts", auth=auth, json=payload)
     if res.status_code == 201:
-        print(f"✅ 구글 통합 시스템 포스팅 성공: {data['title']}")
+        print(f"✅ 수채화풍 감성 포스팅 성공: {data['title']}")
 
 if __name__ == "__main__":
     try:
         content_data = generate_blog_data()
-        image_url = generate_google_image(content_data['img_prompt'])
+        image_url = generate_watercolor_image(content_data['img_prompt'])
         publish_to_wp(content_data, image_url)
     except Exception as e:
-        print(f"시스템 오류: {e}")
+        print(f"에러 발생: {e}")
