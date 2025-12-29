@@ -14,6 +14,8 @@ from google.genai import types
 from app.config import Settings
 from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.ai_openai import make_openai_client, generate_blog_post, generate_thumbnail_title
+from app.ai_gemini_image import make_gemini_client, generate_nanobanana_image_png_bytes
+from app.thumb_overlay import to_square_1024, add_title_to_image
 
 S = Settings()
 
@@ -40,7 +42,7 @@ if not (WP_URL and WP_USER and WP_PW):
     raise SystemExit(1)
 
 openai_client = make_openai_client(OPENAI_API_KEY)
-gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+gemini_client = make_gemini_client(GOOGLE_API_KEY)
 
 OPENAI_MODEL = "gpt-5-mini"
 GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
@@ -57,139 +59,8 @@ def _safe_slug_filename(name: str, fallback: str) -> str:
     s = s[:60].strip("-") or fallback
     return s
 
-# =========================
-# 3) Gemini NanoBanana (이미지 생성)
-# =========================
-def generate_nanobanana_image_png_bytes(prompt: str) -> bytes:
-    img_prompt = f"""
-Create ONE single scene illustration for a blog thumbnail.
-Hard constraints:
-- square (1:1)
-- SINGLE scene, SINGLE frame
-- NO collage, NO triptych, NO split panels, NO multiple images
-- NO grid, NO montage, NO storyboard
-- centered subject, clean background
-- no text, no watermark, no logo
-Style: clean minimal, soft light, high clarity
-Prompt: {prompt}
-"""
-
-    resp = gemini_client.models.generate_content(
-        model=GEMINI_IMAGE_MODEL,
-        contents=[img_prompt],
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-    )
-
-    # candidates 경로(주로 여기)
-    candidates = getattr(resp, "candidates", None)
-    if candidates:
-        for cand in candidates:
-            content = getattr(cand, "content", None)
-            if not content:
-                continue
-            parts = getattr(content, "parts", None) or []
-            for part in parts:
-                inline = getattr(part, "inline_data", None)
-                if inline and getattr(inline, "data", None):
-                    data = inline.data
-                    if isinstance(data, (bytes, bytearray)):
-                        return bytes(data)
-                    if isinstance(data, str):
-                        import base64
-                        return base64.b64decode(data)
-
-    # 혹시 resp.parts 형태로 오는 경우
-    parts = getattr(resp, "parts", None)
-    if parts:
-        for part in parts:
-            inline = getattr(part, "inline_data", None)
-            if inline and getattr(inline, "data", None):
-                data = inline.data
-                if isinstance(data, (bytes, bytearray)):
-                    return bytes(data)
-                if isinstance(data, str):
-                    import base64
-                    return base64.b64decode(data)
-
-    raise RuntimeError("Gemini 응답에서 이미지 데이터를 찾지 못했습니다.")
-
-
-# =========================
-# 4) Thumbnail 텍스트 오버레이
-# =========================
-def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    font_candidates = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ]
-    for path in font_candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def add_title_to_image(image_bytes: bytes, title: str) -> bytes:
-    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    w, h = img.size
-
-    draw = ImageDraw.Draw(img)
-
-    # 하단 반투명 바(가독성)
-    bar_h = int(h * 0.28)
-    overlay = Image.new("RGBA", (w, bar_h), (0, 0, 0, 130))
-    img.paste(overlay, (0, h - bar_h), overlay)
-
-    font_size = max(28, int(w * 0.055))
-    font = _load_font(font_size)
-
-    # 너무 길면 자동 줄바꿈
-    wrapped = textwrap.fill(title, width=10)
-
-    # 텍스트 그림자 + 흰색 본문
-    # (Pillow 버전 차이를 고려해 multiline_textbbox 우선)
-    try:
-        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, align="center")
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-    except Exception:
-        text_w, text_h = draw.multiline_textsize(wrapped, font=font)
-
-    x = (w - text_w) // 2
-    y = h - bar_h + (bar_h - text_h) // 2
-
-    # shadow
-    for dx, dy in [(2, 2), (2, 0), (0, 2)]:
-        draw.multiline_text((x + dx, y + dy), wrapped, font=font, fill=(0, 0, 0, 180), align="center")
-
-    draw.multiline_text((x, y), wrapped, font=font, fill=(255, 255, 255, 255), align="center")
-
-    out = BytesIO()
-    img.convert("RGB").save(out, format="PNG")
-    return out.getvalue()
-    
 from PIL import Image
 from io import BytesIO
-
-def to_square_1024(image_bytes: bytes) -> bytes:
-    """
-    어떤 비율로 오든 중앙 기준으로 정사각 크롭 후 1024x1024로 고정
-    """
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    w, h = img.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    img = img.crop((left, top, left + side, top + side))
-    img = img.resize((1024, 1024), Image.LANCZOS)
-
-    out = BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
 
 # =========================
 # 5) WordPress: Media Upload (RAW binary) + Post Publish
@@ -274,13 +145,12 @@ if __name__ == "__main__":
 
         # 3) 이미지 2장 생성 (Gemini NanoBanana)
         print("🎨 Gemini 이미지(상단/대표) 생성 중...")
-        hero_img = generate_nanobanana_image_png_bytes(post["img_prompt"])
-
-        print("🎨 Gemini 이미지(중간) 생성 중...")
+        hero_img = generate_nanobanana_image_png_bytes(gemini_client, GEMINI_IMAGE_MODEL, post["img_prompt"])
         body_img = generate_nanobanana_image_png_bytes(
-            post["img_prompt"] + ", different composition, different angle, no text"
+        gemini_client, GEMINI_IMAGE_MODEL,
+        post["img_prompt"] + ", different composition, different angle, no text"
         )
-        
+
         # ✅ 이미지 생성 직후 무조건 1:1 정사각 고정
         hero_img = to_square_1024(hero_img)
         body_img = to_square_1024(body_img)
