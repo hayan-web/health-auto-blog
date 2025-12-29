@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 from openai import OpenAI
 
 # 설정값 불러오기
@@ -10,60 +11,62 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def generate_post_and_image():
-    # 1. 건강 블로그 글 생성
+def generate_post_data():
+    # 1. 사용자 프롬프트 반영 (JSON 응답 유도)
+    system_prompt = """
+    당신은 4050 건강 전문 실감형 블로그 작가입니다. 
+    반드시 다음 지침을 준수하여 JSON 형식으로만 응답하세요.
+    - 말투: 사실적인 구어체, 반말 금지, 자연스러운 흐름
+    - 특수문자 및 마크다운(##, **, 불렛포인트) 절대 금지
+    - 이미지: 실사 금지, 반드시 지브리 애니메이션 풍 또는 따뜻한 수채화풍 일러스트로 묘사
+    - 형식: {"title": "제목", "content": "본문내용", "img_prompt": "DALL-E용 영어 프롬프트"}
+    """
+    
     response = client.chat.completions.create(
         model="gpt-4o",
+        response_format={ "type": "json_object" }, # JSON 모드 활성화
         messages=[
-            {"role": "system", "content": "4050 건강 전문 에디터입니다. 반드시 순수 HTML로만 작성하세요. 구조: [TITLE] 제목 [BODY] 본문 [IMAGE_PROMPT] 이미지 생성을 위한 영어 묘사(1문장)"},
-            {"role": "user", "content": "4050 세대에게 유용한 건강 정보를 하나 선정해서 블로그 글을 써주세요."}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "40대와 50대가 가장 고민하는 '수면의 질 개선'에 대해 실제 상황처럼 생생하게 써줘."}
         ]
     )
-    res_text = response.choices[0].message.content
     
-    # 데이터 분할
-    try:
-        title = res_text.split('[TITLE]')[1].split('[BODY]')[0].strip()
-        body = res_text.split('[BODY]')[1].split('[IMAGE_PROMPT]')[0].strip()
-        img_prompt = res_text.split('[IMAGE_PROMPT]')[1].strip()
-    except:
-        title = "중년 건강 관리의 모든 것"
-        body = res_text
-        img_prompt = "A high-quality, realistic photo of healthy food and a middle-aged person exercising happily."
+    # JSON 파싱
+    data = json.loads(response.choices[0].message.content)
+    return data
 
-    # 2. DALL-E 3 이미지 생성 (대화창이 아닌 시스템 내부에서 실행)
-    print(f"이미지 생성 중: {img_prompt}")
+def generate_ai_image(prompt):
+    # 2. 애니메이션 풍 이미지 생성
+    print(f"그림 그리는 중: {prompt}")
     img_res = client.images.generate(
         model="dall-e-3",
-        prompt=f"A professional, realistic, and warm photo for a health blog. Topic: {img_prompt}. High resolution, 16:9 aspect ratio.",
+        prompt=f"{prompt}, Studio Ghibli style, warm lighting, cozy atmosphere, high quality digital art, 16:9 aspect ratio",
         size="1024x1024",
-        quality="standard",
         n=1,
     )
-    img_url = img_res.data[0].url
-    
-    return title, body, img_url
+    return img_res.data[0].url
 
-def post_to_wordpress(title, body, img_url):
-    # 이미지와 본문 결합
-    img_html = f'<div style="margin-bottom:25px;"><img src="{img_url}" alt="{title}" style="width:100%; border-radius:15px;"></div>'
-    final_content = img_html + body
+def post_to_wordpress(data, img_url):
+    # 본문 구성 (특수문자 없이 줄바꿈만 적용)
+    content_html = f'<div style="margin-bottom:20px;"><img src="{img_url}" style="width:100%; border-radius:15px;"></div>'
+    # 본문의 줄바꿈을 HTML 태그로 변환
+    formatted_body = data['content'].replace('\n', '<br>')
+    content_html += f'<div style="font-size:1.1rem; line-height:1.8;">{formatted_body}</div>'
     
     endpoint = f"{WP_URL}/wp-json/wp/v2/posts"
     auth = (WP_USERNAME, WP_PASSWORD)
     
-    data = {
-        "title": title,
-        "content": final_content,
+    wp_data = {
+        "title": data['title'],
+        "content": content_html,
         "status": "publish"
     }
     
-    res = requests.post(endpoint, auth=auth, json=data)
+    res = requests.post(endpoint, auth=auth, json=wp_data)
     if res.status_code == 201:
-        print(f"✅ AI 이미지 포함 포스팅 완료: {title}")
-    else:
-        print(f"❌ 실패: {res.text}")
+        print(f"✅ 맞춤형 포스팅 완료: {data['title']}")
 
 if __name__ == "__main__":
-    title, body, img_url = generate_post_and_image()
-    post_to_wordpress(title, body, img_url)
+    post_json = generate_post_data()
+    image_url = generate_ai_image(post_json['img_prompt'])
+    post_to_wordpress(post_json, image_url)
