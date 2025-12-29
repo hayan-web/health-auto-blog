@@ -179,19 +179,20 @@ Prompt: {prompt}
 # =========================
 def upload_media_to_wp(image_bytes: bytes, filename: str) -> str:
     """
-    WP 미디어로 업로드 후 source_url 반환
+    RAW binary 방식으로 워드프레스 미디어 업로드 (415 회피용)
     """
     media_endpoint = f"{WP_URL}/wp-json/wp/v2/media"
 
-    file_obj = BytesIO(image_bytes)
-    files = {
-        "file": (filename, file_obj, "image/png")
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Type": "image/png",
     }
 
     res = requests.post(
         media_endpoint,
         auth=(WP_USER, WP_PW),
-        files=files,
+        headers=headers,
+        data=image_bytes,
         timeout=60,
     )
 
