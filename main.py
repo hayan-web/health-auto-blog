@@ -2,13 +2,26 @@ import re
 import uuid
 
 from app.config import Settings
-from app.ai_openai import make_openai_client, generate_blog_post, generate_thumbnail_title
-from app.ai_gemini_image import make_gemini_client, generate_nanobanana_image_png_bytes
+from app.ai_openai import (
+    make_openai_client,
+    generate_blog_post,
+    generate_thumbnail_title,
+)
+from app.ai_gemini_image import (
+    make_gemini_client,
+    generate_nanobanana_image_png_bytes,
+)
 from app.thumb_overlay import to_square_1024, add_title_to_image
 from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
 from app.dedupe import pick_retry_reason
 from app.keyword_picker import pick_keyword_by_naver
+
+
+# =========================
+# Settings 인스턴스 (필수)
+# =========================
+S = Settings()
 
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     """
