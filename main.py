@@ -6,6 +6,8 @@ from app.ai_openai import make_openai_client, generate_blog_post, generate_thumb
 from app.ai_gemini_image import make_gemini_client, generate_nanobanana_image_png_bytes
 from app.thumb_overlay import to_square_1024, add_title_to_image
 from app.wp_client import upload_media_to_wp, publish_to_wp
+from app.store import load_state, save_state, add_history_item
+from app.dedupe import pick_retry_reason
 
 
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
@@ -29,6 +31,26 @@ def run() -> None:
 
     # 2) 글 생성(OpenAI)
     post = generate_blog_post(openai_client, S.OPENAI_MODEL)
+    state = load_state()
+history = state.get("history", [])
+
+MAX_RETRY = 3
+post = None
+
+for i in range(1, MAX_RETRY + 1):
+    candidate = generate_blog_post(openai_client, S.OPENAI_MODEL)
+
+    dup, reason = pick_retry_reason(candidate.get("title", ""), history)
+    if dup:
+        print(f"♻️ 중복 감지({reason}) → 재생성 {i}/{MAX_RETRY}")
+        continue
+
+    post = candidate
+    break
+
+if not post:
+    raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
+
 
     # 3) 썸네일 짧은 타이틀(OpenAI)
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
