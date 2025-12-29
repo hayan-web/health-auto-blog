@@ -91,7 +91,8 @@ def run() -> None:
     body_img = generate_nanobanana_image_png_bytes(
         gemini_client,
         S.GEMINI_IMAGE_MODEL,
-        post["img_prompt"] + ", single scene, no collage, different composition, different angle, no text, square 1:1",
+        post["img_prompt"]
+        + ", single scene, no collage, different composition, different angle, no text, square 1:1",
     )
 
     # 6) 1:1 고정
@@ -128,18 +129,21 @@ def run() -> None:
         )
     else:
         # fallback: content 단일 문자열일 때
-        raw = post.get("content", "") or post.get("body", "") or ""
-        styled_html = f"""
-        <p style="margin:0 0 14px; font-size:17px; line-height:1.75; letter-spacing:-0.2px;">{raw}</p>
-        """.strip()
-
-    # ✅ 쿠팡 박스 삽입(키워드 기반)
-    styled_html = inject_coupang(styled_html, keyword)
+        raw = (post.get("content") or post.get("body") or "").strip()
+        raw = raw.replace("\n", "<br/>")
+        styled_html = (
+            "<div style=\"line-height:1.9; font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;\">"
+            f"<p style=\"margin:0 0 14px; font-size:17px; line-height:1.75; letter-spacing:-0.2px;\">{raw}</p>"
+            "</div>"
+        )
 
     # ✅ 애드센스 블록 삽입(ENV에 설정된 경우만)
     styled_html = inject_ads(styled_html)
 
-    # ✅ publish_to_wp가 content_html을 우선 사용하도록 해둔 상태라면 이걸로 본문 교체됨
+    # ✅ 쿠팡 박스 삽입(키워드 기반)
+    styled_html = inject_coupang(styled_html, keyword=keyword)
+
+    # ✅ publish_to_wp가 content_html을 우선 사용하도록 되어 있으면 이걸로 본문이 들어갑니다.
     post["content_html"] = styled_html
 
     # 9) WP 글 발행
