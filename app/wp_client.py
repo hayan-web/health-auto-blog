@@ -1,5 +1,25 @@
 # app/wp_client.py
+import time
 import requests
+
+
+def _get_media_url(wp_url: str, wp_user: str, wp_pw: str, media_id: int, timeout: int = 30) -> str:
+    wp_url = wp_url.rstrip("/")
+    endpoint = f"{wp_url}/wp-json/wp/v2/media/{media_id}"
+
+    r = requests.get(endpoint, auth=(wp_user, wp_pw), timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError(f"미디어 조회 실패: {r.status_code} / {r.text}")
+
+    j = r.json()
+    url = (
+        j.get("source_url")
+        or (j.get("guid") or {}).get("rendered")
+        or (((j.get("media_details") or {}).get("sizes") or {}).get("full") or {}).get("source_url")
+    )
+    if not url:
+        raise RuntimeError(f"미디어 URL 파싱 실패. keys={list(j.keys())}")
+    return str(url)
 
 
 def upload_media_to_wp(
@@ -12,15 +32,12 @@ def upload_media_to_wp(
 ) -> tuple[str, int]:
     """
     WP 미디어 업로드 (RAW binary + headers 방식: 415 방지)
-    반환: (source_url, media_id)
-
-    ✅ WP/플러그인/테마 환경에 따라 source_url 키가 없거나 비어있는 경우가 있어
-       guid.rendered / media_details.sizes.full.source_url 까지 fallback 처리
+    ✅ Imsanity가 PNG→JPG 변환/리네임을 하더라도 최종 source_url을 다시 조회해서 반환
+    반환: (final_source_url, media_id)
     """
     wp_url = wp_url.rstrip("/")
     media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
 
-    # 파일 확장자 기반으로 Content-Type 보정(서버가 확장자 보고 처리하는 경우가 있음)
     lower = (filename or "").lower()
     if lower.endswith(".jpg") or lower.endswith(".jpeg"):
         ctype = "image/jpeg"
@@ -50,20 +67,23 @@ def upload_media_to_wp(
 
     j = res.json()
     media_id = j.get("id")
+    if not media_id:
+        raise RuntimeError("미디어 업로드 응답에 id가 없습니다.")
 
-    # ✅ URL fallback
-    url = (
-        j.get("source_url")
-        or (j.get("guid") or {}).get("rendered")
-        or (((j.get("media_details") or {}).get("sizes") or {}).get("full") or {}).get("source_url")
-    )
+    # ✅ 변환(리사이즈/포맷변환)이 직후에 적용되면 source_url이 바뀔 수 있으니, 최종 URL 재조회
+    # (Imsanity가 서버에서 처리하는데 약간의 시간이 걸리는 환경도 있어 retry)
+    last_url = None
+    for i in range(1, 6):
+        try:
+            url = _get_media_url(wp_url, wp_user, wp_pw, int(media_id))
+            last_url = url
+            if url.startswith("http"):
+                return url, int(media_id)
+        except Exception as e:
+            print(f"⚠️ media url 재조회 실패({i}/5): {e}")
+        time.sleep(1)
 
-    if not media_id or not url or not str(url).startswith("http"):
-        raise RuntimeError(
-            f"미디어 업로드는 성공했지만 URL 파싱 실패. id={media_id}, url={url}, keys={list(j.keys())}"
-        )
-
-    return str(url), int(media_id)
+    raise RuntimeError(f"미디어 업로드는 성공했지만 최종 URL 조회 실패. last_url={last_url}")
 
 
 def publish_to_wp(
@@ -77,26 +97,17 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    ✅ content_html이 있으면 그걸 그대로 사용(포맷터 스타일 유지)
-    - 이미지 2장: 포맷터가 이미 넣었으면 중복 삽입 안 함
-    - featured_media 지정
-    반환: post_id
+    ✅ content_html이 있으면 그걸 그대로 사용(스타일 유지)
     """
     wp_url = wp_url.rstrip("/")
 
-    # ✅ formatter_v2 결과를 최우선으로 사용
     final_html = (data.get("content_html") or "").strip()
     if not final_html:
-        # fallback: 기존 content를 단순 p로라도 감싸서 발행
         raw = (data.get("content") or data.get("body") or "").strip()
         if not raw:
             raise RuntimeError("본문(content/content_html)이 비어 있습니다.")
         paras = [p.strip() for p in raw.split("\n") if p.strip()]
-
-        def ptag(p: str) -> str:
-            return f"<p>{p}</p>"
-
-        final_html = "\n".join(ptag(p) for p in paras)
+        final_html = "\n".join(f"<p>{p}</p>" for p in paras)
 
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
     payload = {
