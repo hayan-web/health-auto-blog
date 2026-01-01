@@ -3,53 +3,33 @@ from __future__ import annotations
 import os
 
 
-def adsense_inarticle_block() -> str:
+def _get(name: str) -> str:
+    return (os.getenv(name, "") or "").strip()
+
+
+def inject_adsense_slots(html: str) -> str:
     """
-    인아티클 광고(본문 삽입형) - slot/client는 ENV에서 받습니다.
-    (주의) 승인/정책/테마 설정에 따라 노출이 안 될 수 있습니다.
+    formatter_v2가 넣어둔 마커 3곳을 수동 광고코드로 치환
+      - <!--AD_SLOT_TOP-->    : 요약박스 위
+      - <!--AD_SLOT_MID-->    : 첫 소제목카드 위
+      - <!--AD_SLOT_BOTTOM--> : 맨 아래
+    광고코드가 없으면 해당 슬롯은 제거(빈 div도 제거)
     """
-    client = (os.getenv("ADSENSE_CLIENT", "") or "").strip()
-    slot = (os.getenv("ADSENSE_SLOT_INARTICLE", "") or "").strip()
+    top = _get("ADSENSE_BLOCK_TOP")
+    mid = _get("ADSENSE_BLOCK_MID")
+    bottom = _get("ADSENSE_BLOCK_BOTTOM")
 
-    if not client or not slot:
-        return ""  # 설정 없으면 삽입하지 않음
+    def repl(marker: str, code: str) -> str:
+        if code:
+            return code
+        return ""  # 없으면 슬롯 자체 제거
 
-    return f"""
-    <div style="margin:18px 0;">
-      <ins class="adsbygoogle"
-           style="display:block; text-align:center;"
-           data-ad-client="{client}"
-           data-ad-slot="{slot}"
-           data-ad-format="auto"
-           data-full-width-responsive="true"></ins>
-      <script>(adsbygoogle = window.adsbygoogle || []).push({{}});</script>
-    </div>
-    """.strip()
+    html = html.replace("<!--AD_SLOT_TOP-->", repl("TOP", top))
+    html = html.replace("<!--AD_SLOT_MID-->", repl("MID", mid))
+    html = html.replace("<!--AD_SLOT_BOTTOM-->", repl("BOTTOM", bottom))
 
+    # 남은 빈 ads div 정리(대충)
+    html = html.replace("<div class='ads'></div>", "")
+    html = html.replace('<div class="ads"></div>', "")
 
-def inject_ads(html: str) -> str:
-    """
-    간단 규칙:
-    - 첫 구분선 이후 1회
-    - 중간쯤 1회
-    """
-    block = adsense_inarticle_block()
-    if not block:
-        return html
-
-    parts = html.split("<hr")
-    if len(parts) < 3:
-        return html + "\n" + block
-
-    # 첫 번째 hr 앞뒤로 복원
-    rebuilt = []
-    rebuilt.append(parts[0])
-    rebuilt.append("<hr" + parts[1])  # 첫 hr 포함
-    rebuilt.append(block)             # 첫 광고
-    # 나머지 붙이기
-    rest = ["<hr" + p for p in parts[2:]]
-    html2 = "\n".join(rebuilt + rest)
-
-    # 중간 광고 추가(대략)
-    mid = len(html2) // 2
-    return html2[:mid] + "\n" + block + "\n" + html2[mid:]
+    return html
