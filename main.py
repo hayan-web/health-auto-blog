@@ -23,8 +23,26 @@ from app.monetize_adsense import inject_ads
 from app.monetize_coupang import inject_coupang
 
 
+# =========================
+# Settings 인스턴스 (필수)
+# =========================
+S = Settings()
+
+
+# ✅ 쿠팡이 실제 삽입될 때만 최상단에 넣을 고지 문구
+DISCLOSURE_HTML = """
+<div style="margin:10px 0 18px; padding:10px 12px; border-radius:10px; background:#f6f7f9; border:1px solid #e7e9ee;">
+  <p style="margin:0; font-size:13px; line-height:1.6; color:#555;">
+    이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+  </p>
+</div>
+""".strip()
+
+
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
-    """헤더에 넣어도 안전한 ASCII 파일명 생성 (한글/특수문자 없음)"""
+    """
+    헤더에 넣어도 안전한 ASCII 파일명 생성 (한글/특수문자 없음)
+    """
     uid = uuid.uuid4().hex[:10]
     prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
     if not prefix:
@@ -32,73 +50,31 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     return f"{prefix}-{uid}.{ext}"
 
 
-def _fallback_html(title: str, hero_url: str, body_url: str, raw_text: str) -> str:
-    """formatter가 실패하거나 sections 구조가 없을 때 최소 스타일 HTML"""
-    paras = [p.strip() for p in (raw_text or "").split("\n") if p.strip()]
-    if not paras:
-        paras = ["(본문이 비어 있어 기본 문구로 대체되었습니다.)"]
-
-    mid_idx = max(1, len(paras) // 2)
-
-    def ptag(p: str) -> str:
-        p = (
-            p.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        return f"<p style='margin:0 0 14px; font-size:17px; line-height:1.85; letter-spacing:-0.2px; color:#222;'>{p}</p>"
-
-    top_img = f"""
-<div style="margin:0 0 22px;">
-  <img src="{hero_url}" alt="{title}" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.12);" />
-</div>
-""".strip()
-
-    mid_img = f"""
-<div style="margin:22px 0;">
-  <img src="{body_url}" alt="{title} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.10);" />
-</div>
-""".strip()
-
-    body_parts = []
-    for i, p in enumerate(paras):
-        if i == mid_idx:
-            body_parts.append(mid_img)
-        body_parts.append(ptag(p))
-
-    return f"""
-{top_img}
-<div style="font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;">
-  <h2 style="margin:6px 0 14px; font-size:22px; line-height:1.35; letter-spacing:-0.4px;">{title}</h2>
-  {''.join(body_parts)}
-</div>
-""".strip()
-
-
 def run() -> None:
-    s = Settings()
+    # 0) Settings 로드
+    S = Settings()
 
     # 1) 클라이언트 준비
-    openai_client = make_openai_client(s.OPENAI_API_KEY)
-    gemini_client = make_gemini_client(s.GOOGLE_API_KEY)
+    openai_client = make_openai_client(S.OPENAI_API_KEY)
+    gemini_client = make_gemini_client(S.GOOGLE_API_KEY)
 
-    # 2) 중복 방지 state 로드
+    # 2) 중복 방지용 state 로드
     state = load_state()
     history = state.get("history", [])
 
-    # 3) 네이버 기반 키워드 선정
+    # 2.5) 네이버 기반 키워드 선정
     keyword, debug = pick_keyword_by_naver(
-        s.NAVER_CLIENT_ID, s.NAVER_CLIENT_SECRET, history
+        S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history
     )
     print("🔎 선택된 키워드:", keyword)
     print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
 
-    # 4) 글 생성(OpenAI) + 중복 회피
+    # 3) 글 생성(OpenAI) + 중복 회피
     MAX_RETRY = 3
     post = None
 
     for i in range(1, MAX_RETRY + 1):
-        candidate = generate_blog_post(openai_client, s.OPENAI_MODEL, keyword)
+        candidate = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
 
         dup, reason = pick_retry_reason(candidate.get("title", ""), history)
         if dup:
@@ -111,28 +87,29 @@ def run() -> None:
     if not post:
         raise RuntimeError("중복 회피 실패: 재시도 횟수 초과")
 
-    # 5) 썸네일용 짧은 타이틀
-    thumb_title = generate_thumbnail_title(openai_client, s.OPENAI_MODEL, post["title"])
+    # 4) 썸네일용 짧은 타이틀
+    thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 썸네일 타이틀:", thumb_title)
 
-    # 6) 이미지 2장 생성 (NanoBanana)
+    # 5) 이미지 2장 생성 (Gemini NanoBanana)
     print("🎨 Gemini 이미지(상단/대표) 생성 중...")
     hero_img = generate_nanobanana_image_png_bytes(
-        gemini_client, s.GEMINI_IMAGE_MODEL, post["img_prompt"]
+        gemini_client, S.GEMINI_IMAGE_MODEL, post["img_prompt"]
     )
 
     print("🎨 Gemini 이미지(중간) 생성 중...")
     body_img = generate_nanobanana_image_png_bytes(
         gemini_client,
-        s.GEMINI_IMAGE_MODEL,
+        S.GEMINI_IMAGE_MODEL,
         post["img_prompt"]
         + ", single scene, no collage, different composition, different angle, no text, square 1:1",
     )
 
-    # 7) 1:1 고정 + 썸네일 타이틀 오버레이
+    # 6) 1:1 고정
     hero_img = to_square_1024(hero_img)
     body_img = to_square_1024(body_img)
 
+    # 7) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
     hero_img_titled = to_square_1024(hero_img_titled)
 
@@ -141,52 +118,57 @@ def run() -> None:
     body_name = make_ascii_filename("body")
 
     hero_url, hero_media_id = upload_media_to_wp(
-        s.WP_URL, s.WP_USERNAME, s.WP_APP_PASSWORD, hero_img_titled, hero_name
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
     )
     body_url, _ = upload_media_to_wp(
-        s.WP_URL, s.WP_USERNAME, s.WP_APP_PASSWORD, body_img, body_name
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
 
     # ==========================================================
-    # 9) 본문 스타일 적용 + 쿠팡/애드센스 삽입 (발행 전에!)
-    # - publish_to_wp()에서 data["content_html"] 우선 사용 필요
+    # 8.5) 본문 스타일 적용 + 쿠팡/애드센스 삽입 (발행 전에!)
+    # - post["content_html"]를 만들고 publish_to_wp가 우선 사용하도록 구성
     # ==========================================================
-    try:
+    if post.get("sections"):
         styled_html = format_post_body(
             title=post["title"],
-            hero_url=hero_url,
-            body_url=body_url,
             intro=post.get("intro", ""),
             sections=post.get("sections", []),
             outro=post.get("outro", ""),
             disclaimer="의학적 진단이 아닌 일반 정보입니다. 증상이 지속되면 전문가 상담을 권장드립니다.",
         )
-    except Exception as e:
-        print("⚠️ format_post_body 실패 → fallback HTML 사용:", str(e)[:200])
-        raw = post.get("content") or post.get("body") or ""
-        styled_html = _fallback_html(post["title"], hero_url, body_url, raw)
+    else:
+        raw = post.get("content", "") or post.get("body", "") or ""
+        # 기본 문단 분리(줄바꿈 기준)
+        paras = [p.strip() for p in raw.split("\n") if p.strip()]
+        styled_html = ""
+        for p in paras:
+            styled_html += (
+                f"<p style=\"margin:0 0 14px; font-size:17px; line-height:1.85; letter-spacing:-0.2px; color:#222;\">{p}</p>"
+            )
 
-    # ✅ 쿠팡: 대가성 문구를 "최상단"에 붙이도록 inject_coupang에서 처리되어야 함
-    styled_html = inject_coupang(styled_html, keyword)
+    # ✅ 쿠팡 삽입(키워드 기반) + 삽입 성공 시에만 최상단 고지 문구 추가
+    styled_html, coupang_inserted = inject_coupang(styled_html, keyword)
+    if coupang_inserted:
+        styled_html = DISCLOSURE_HTML + "\n" + styled_html
 
-    # ✅ 애드센스: ENV 설정된 경우만 삽입
+    # ✅ 애드센스 블록 삽입(ENV에 설정된 경우만)
     styled_html = inject_ads(styled_html)
 
-    # ✅ WP 발행 시 이 HTML을 그대로 사용
+    # ✅ publish_to_wp에서 content_html 우선 사용하도록(아래 wp_client도 그에 맞게 되어 있어야 함)
     post["content_html"] = styled_html
 
-    # 10) WP 글 발행
+    # 9) WP 글 발행
     post_id = publish_to_wp(
-        s.WP_URL,
-        s.WP_USERNAME,
-        s.WP_APP_PASSWORD,
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
         post,
         hero_url,
         body_url,
         featured_media_id=hero_media_id,
     )
 
-    # 11) 히스토리 저장
+    # 10) 히스토리 저장
     state = add_history_item(
         state,
         {
