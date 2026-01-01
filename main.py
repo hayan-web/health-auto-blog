@@ -1,7 +1,6 @@
-import os
+import base64
 import re
 import uuid
-from datetime import datetime
 
 from app.config import Settings
 from app.ai_openai import (
@@ -23,7 +22,7 @@ from app.keyword_picker import pick_keyword_by_naver
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 
-# ✅ 쿠팡(선택)
+# ✅ 쿠팡
 from app.monetize_coupang import inject_coupang
 
 
@@ -38,69 +37,60 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     return f"{prefix}-{uid}.{ext}"
 
 
-def _safe_slug(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s+", "-", s)
-    s = re.sub(r"[^a-zA-Z0-9가-힣_-]+", "", s)
-    return s[:60] or "post"
-
-
-def save_preview_html(html: str, title: str, keyword: str) -> tuple[str, str]:
-    os.makedirs("preview", exist_ok=True)
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    slug = _safe_slug(keyword or title)
-    stamped_path = os.path.join("preview", f"preview_{ts}_{slug}.html")
-    latest_path = os.path.join("preview", "preview_latest.html")
-
-    wrapper = f"""<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>{(title or '').strip()}</title>
-  <style>
-    body {{ margin: 0; padding: 24px; background:#f6f7fb; }}
-    .preview-host {{ max-width: 860px; margin: 0 auto; background:#fff; border-radius:16px; padding: 22px; box-shadow:0 10px 30px rgba(0,0,0,0.08); }}
-  </style>
-</head>
-<body>
-  <div class="preview-host">
-    {html}
-  </div>
-</body>
-</html>
-"""
-
-    with open(stamped_path, "w", encoding="utf-8") as f:
-        f.write(wrapper)
-    with open(latest_path, "w", encoding="utf-8") as f:
-        f.write(wrapper)
-
-    return latest_path, stamped_path
-
-
-def _inject_disclosure_at_top(html: str, disclosure_text: str) -> str:
+def _fallback_png_bytes(text: str) -> bytes:
     """
-    formatter_v2의 <div class="wrap"> 바로 다음에 disclosure 박스를 넣습니다.
+    Gemini가 실패할 때 대체 이미지 생성.
+    - PIL 있으면 1024x1024로 텍스트 넣어 생성
+    - PIL 없으면 최소 PNG(1x1)라도 반환해서 파이프라인이 죽지 않게
     """
-    if not disclosure_text:
-        return html
-    marker = '<div class="wrap">'
-    if marker in html:
-        return html.replace(
-            marker,
-            f'{marker}\n  <div class="disclosure">{disclosure_text}</div>',
-            1
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+        img = Image.new("RGB", (1024, 1024), (245, 245, 245))
+        draw = ImageDraw.Draw(img)
+
+        # 폰트는 환경마다 달라서 안전하게 기본 폰트
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 48)
+        except Exception:
+            font = ImageFont.load_default()
+
+        msg = (text or "health").strip()
+        msg = msg[:40]
+
+        # 중앙 배치
+        w, h = draw.textbbox((0, 0), msg, font=font)[2:]
+        draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
+
+        from io import BytesIO
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    except Exception:
+        # 최소 PNG 1x1
+        tiny_png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
+            "ASsJTYQAAAAASUVORK5CYII="
         )
-    # 혹시 wrap 마커가 없으면 가장 앞에 넣기
-    return f'<div class="disclosure">{disclosure_text}</div>\n{html}'
+        return base64.b64decode(tiny_png_b64)
+
+
+def _ensure_str_html(result):
+    """
+    inject_coupang이 아래 케이스 모두 커버:
+    - str 반환
+    - (str, bool) 반환
+    """
+    if isinstance(result, tuple) and len(result) >= 1:
+        html = result[0]
+        inserted = bool(result[1]) if len(result) >= 2 else True
+        return str(html), inserted
+    return str(result), False  # 변화 여부는 호출부에서 비교로 판단 가능
 
 
 def run() -> None:
     S = Settings()
-
-    SKIP_PUBLISH = os.getenv("SKIP_PUBLISH", "0").strip() == "1"
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
     gemini_client = make_gemini_client(S.GOOGLE_API_KEY)
@@ -109,7 +99,9 @@ def run() -> None:
     history = state.get("history", [])
 
     # 1) 키워드 선정
-    keyword, debug = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
+    keyword, debug = pick_keyword_by_naver(
+        S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history
+    )
     print("🔎 선택된 키워드:", keyword)
     print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
 
@@ -134,36 +126,41 @@ def run() -> None:
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 썸네일 타이틀:", thumb_title)
 
-    # 4) 이미지 2장 생성 (1:1 + 콜라주 방지)
+    # 4) 이미지 2장 생성 (실패 시 fallback)
     hero_prompt = (post.get("img_prompt") or "").strip()
     if not hero_prompt:
         hero_prompt = f"{keyword} 주제의 건강 정보 블로그 삽화, single scene, no collage, no text, square 1:1"
 
     body_prompt = hero_prompt + ", single scene, no collage, different composition, different angle, no text, square 1:1"
 
-    print("🎨 Gemini 이미지(상단/대표) 생성 중...")
-    hero_img = generate_nanobanana_image_png_bytes(
-        gemini_client, S.GEMINI_IMAGE_MODEL, hero_prompt, retries=3
-    )
-
-    print("🎨 Gemini 이미지(중간) 생성 중...")
     try:
-        body_img = generate_nanobanana_image_png_bytes(
-            gemini_client, S.GEMINI_IMAGE_MODEL, body_prompt, retries=3
+        print("🎨 Gemini 이미지(상단/대표) 생성 중...")
+        hero_img = generate_nanobanana_image_png_bytes(
+            gemini_client, S.GEMINI_IMAGE_MODEL, hero_prompt
         )
     except Exception as e:
-        # ✅ 중간 이미지 실패해도 파이프라인 멈추지 않게: hero로 대체
-        print(f"⚠️ 중간 이미지 생성 실패 → hero 이미지로 대체합니다. ({e})")
+        print(f"⚠️ 대표 이미지 생성 실패 → 대체 이미지로 진행: {e}")
+        hero_img = _fallback_png_bytes(f"{keyword}")
+
+    try:
+        print("🎨 Gemini 이미지(중간) 생성 중...")
+        body_img = generate_nanobanana_image_png_bytes(
+            gemini_client, S.GEMINI_IMAGE_MODEL, body_prompt
+        )
+    except Exception as e:
+        print(f"⚠️ 중간 이미지 생성 실패 → 대표 이미지 재사용: {e}")
         body_img = hero_img
 
+    hero_img = to_square_1024(hero_img)
+    body_img = to_square_1024(body_img)
 
     # 5) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
     hero_img_titled = to_square_1024(hero_img_titled)
 
     # 6) WP 미디어 업로드
-    hero_name = make_ascii_filename("featured")
-    body_name = make_ascii_filename("body")
+    hero_name = make_ascii_filename("featured", "png")
+    body_name = make_ascii_filename("body", "png")
 
     hero_url, hero_media_id = upload_media_to_wp(
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
@@ -172,7 +169,7 @@ def run() -> None:
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
 
-    # 7) formatter_v2로 HTML 생성
+    # 7) A안 레이아웃 HTML 생성
     sections = post.get("sections") or []
     outro = post.get("outro") or ""
 
@@ -181,7 +178,7 @@ def run() -> None:
         keyword=keyword,
         hero_url=hero_url,
         body_url=body_url,
-        disclosure_html="",  # 쿠팡 들어가면 자동 삽입
+        disclosure_html="",  # 쿠팡 실제 삽입 시 아래에서 채움
         summary_bullets=post.get("summary_bullets") or None,
         sections=sections if isinstance(sections, list) else [],
         warning_bullets=post.get("warning_bullets") or None,
@@ -189,42 +186,30 @@ def run() -> None:
         outro=outro,
     )
 
-    # 8) ✅ 쿠팡 삽입 (문자열/튜플 반환 모두 대응)
-    coupang_inserted = False
-    injected = inject_coupang(html, keyword=keyword)
+    # 8) 쿠팡 삽입 + “실제 삽입”일 때만 대가성 문구 최상단
+    coupang_result = inject_coupang(html, keyword=keyword)
+    html_after_coupang, inserted_flag = _ensure_str_html(coupang_result)
 
-    if isinstance(injected, tuple):
-        # (html, inserted) 형태를 기대
-        html_after_coupang = injected[0] if len(injected) >= 1 else html
-        coupang_inserted = bool(injected[1]) if len(injected) >= 2 else (html_after_coupang != html)
-    else:
-        html_after_coupang = injected
-        coupang_inserted = (html_after_coupang != html)
+    # insert 여부 판단(함수가 bool 안 주면 변경 여부로 판단)
+    coupang_inserted = inserted_flag or (html_after_coupang != html)
+
+    if coupang_inserted:
+        disclosure = "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+        html_after_coupang = html_after_coupang.replace(
+            '<div class="wrap">',
+            f'<div class="wrap">\n  <div class="disclosure">{disclosure}</div>',
+            1,
+        )
 
     html = html_after_coupang
 
-    # ✅ 쿠팡이 실제로 들어갔을 때만 "최상단" 대가성 문구 삽입
-    if coupang_inserted:
-        disclosure = "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
-        html = _inject_disclosure_at_top(html, disclosure)
-
-    # 9) ✅ 애드센스 수동 슬롯 3개 삽입
+    # 9) 애드센스 수동 슬롯 3개 삽입
     html = inject_adsense_slots(html)
 
-    # 10) ✅ 발행 전 미리보기 HTML 저장
-    latest_path, stamped_path = save_preview_html(html, title=post["title"], keyword=keyword)
-    print("🧪 PREVIEW saved:", latest_path)
-    print("🧪 PREVIEW saved:", stamped_path)
-
-    # (옵션) 발행 스킵
-    if SKIP_PUBLISH:
-        print("🟡 SKIP_PUBLISH=1 이므로 발행 없이 미리보기 저장만 하고 종료합니다.")
-        return
-
-    # 11) publish_to_wp가 content_html을 사용하도록 교체
+    # 10) publish_to_wp가 content_html을 우선 사용하도록 교체
     post["content_html"] = html
 
-    # 12) WP 글 발행
+    # 11) WP 글 발행
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -235,7 +220,7 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
-    # 13) 히스토리 저장
+    # 12) 히스토리 저장
     state = add_history_item(
         state,
         {
