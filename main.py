@@ -46,12 +46,6 @@ def _safe_slug(s: str) -> str:
 
 
 def save_preview_html(html: str, title: str, keyword: str) -> tuple[str, str]:
-    """
-    발행 전 최종 HTML을 preview 폴더에 저장
-    - preview/preview_latest.html  (항상 최신)
-    - preview/preview_YYYYmmdd_HHMMSS_<slug>.html
-    반환: (latest_path, stamped_path)
-    """
     os.makedirs("preview", exist_ok=True)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -59,7 +53,6 @@ def save_preview_html(html: str, title: str, keyword: str) -> tuple[str, str]:
     stamped_path = os.path.join("preview", f"preview_{ts}_{slug}.html")
     latest_path = os.path.join("preview", "preview_latest.html")
 
-    # 워드프레스/테마 영향 없이 "단독 미리보기"도 가능하게 최소 HTML 래퍼 제공
     wrapper = f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -87,10 +80,26 @@ def save_preview_html(html: str, title: str, keyword: str) -> tuple[str, str]:
     return latest_path, stamped_path
 
 
+def _inject_disclosure_at_top(html: str, disclosure_text: str) -> str:
+    """
+    formatter_v2의 <div class="wrap"> 바로 다음에 disclosure 박스를 넣습니다.
+    """
+    if not disclosure_text:
+        return html
+    marker = '<div class="wrap">'
+    if marker in html:
+        return html.replace(
+            marker,
+            f'{marker}\n  <div class="disclosure">{disclosure_text}</div>',
+            1
+        )
+    # 혹시 wrap 마커가 없으면 가장 앞에 넣기
+    return f'<div class="disclosure">{disclosure_text}</div>\n{html}'
+
+
 def run() -> None:
     S = Settings()
 
-    # (옵션) 발행 없이 미리보기만 저장하고 끝내기
     SKIP_PUBLISH = os.getenv("SKIP_PUBLISH", "0").strip() == "1"
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
@@ -149,10 +158,14 @@ def run() -> None:
     hero_name = make_ascii_filename("featured")
     body_name = make_ascii_filename("body")
 
-    hero_url, hero_media_id = upload_media_to_wp(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name)
-    body_url, _ = upload_media_to_wp(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name)
+    hero_url, hero_media_id = upload_media_to_wp(
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
+    )
+    body_url, _ = upload_media_to_wp(
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
+    )
 
-    # 7) A안 레이아웃 HTML 생성
+    # 7) formatter_v2로 HTML 생성
     sections = post.get("sections") or []
     outro = post.get("outro") or ""
 
@@ -161,7 +174,7 @@ def run() -> None:
         keyword=keyword,
         hero_url=hero_url,
         body_url=body_url,
-        disclosure_html="",  # 쿠팡 들어가면 아래에서 자동 삽입
+        disclosure_html="",  # 쿠팡 들어가면 자동 삽입
         summary_bullets=post.get("summary_bullets") or None,
         sections=sections if isinstance(sections, list) else [],
         warning_bullets=post.get("warning_bullets") or None,
@@ -169,24 +182,29 @@ def run() -> None:
         outro=outro,
     )
 
-    # 8) 쿠팡 삽입 (실제로 삽입된 경우에만 최상단 대가성 문구)
-    html_after_coupang = inject_coupang(html, keyword=keyword)
+    # 8) ✅ 쿠팡 삽입 (문자열/튜플 반환 모두 대응)
+    coupang_inserted = False
+    injected = inject_coupang(html, keyword=keyword)
 
-    coupang_inserted = (html_after_coupang != html)
-    if coupang_inserted:
-        disclosure = "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
-        html_after_coupang = html_after_coupang.replace(
-            '<div class="wrap">',
-            f'<div class="wrap">\n  <div class="disclosure">{disclosure}</div>',
-            1
-        )
+    if isinstance(injected, tuple):
+        # (html, inserted) 형태를 기대
+        html_after_coupang = injected[0] if len(injected) >= 1 else html
+        coupang_inserted = bool(injected[1]) if len(injected) >= 2 else (html_after_coupang != html)
+    else:
+        html_after_coupang = injected
+        coupang_inserted = (html_after_coupang != html)
 
     html = html_after_coupang
 
-    # 9) 애드센스 수동 슬롯 3개 삽입
+    # ✅ 쿠팡이 실제로 들어갔을 때만 "최상단" 대가성 문구 삽입
+    if coupang_inserted:
+        disclosure = "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+        html = _inject_disclosure_at_top(html, disclosure)
+
+    # 9) ✅ 애드센스 수동 슬롯 3개 삽입
     html = inject_adsense_slots(html)
 
-    # ✅ 10) 발행 전 미리보기 HTML 저장 (핵심: 4단계)
+    # 10) ✅ 발행 전 미리보기 HTML 저장
     latest_path, stamped_path = save_preview_html(html, title=post["title"], keyword=keyword)
     print("🧪 PREVIEW saved:", latest_path)
     print("🧪 PREVIEW saved:", stamped_path)
