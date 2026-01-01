@@ -53,6 +53,13 @@ jobs:
           path: state.json
           key: wp-state-${{ github.repository }}-${{ github.run_id }}
 
+      - name: Upload preview html
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-html
+          path: preview/
+
+
 
 
 
