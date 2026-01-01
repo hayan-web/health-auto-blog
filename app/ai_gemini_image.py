@@ -1,69 +1,84 @@
-from google import genai
-from google.genai import types
+import base64
+import time
+from typing import Any, Optional
 
 
-def make_gemini_client(google_api_key: str) -> genai.Client:
-    return genai.Client(api_key=google_api_key)
+def _extract_inline_image_b64(resp: Any) -> Optional[str]:
+    """
+    Gemini 응답에서 inline_data.data (base64) 문자열을 최대한 다양한 구조로 탐색해 추출
+    """
+    # 1) dict 형태(JSON)
+    if isinstance(resp, dict):
+        candidates = resp.get("candidates") or []
+        for c in candidates:
+            content = c.get("content") or {}
+            parts = content.get("parts") or []
+            for p in parts:
+                inline = p.get("inline_data") or p.get("inlineData") or {}
+                data = inline.get("data")
+                if data:
+                    return data
+
+    # 2) 객체 형태(SDK response)
+    # resp.candidates[*].content.parts[*].inline_data.data
+    candidates = getattr(resp, "candidates", None)
+    if candidates:
+        for c in candidates:
+            content = getattr(c, "content", None)
+            parts = getattr(content, "parts", None) if content else None
+            if not parts:
+                continue
+            for p in parts:
+                inline = getattr(p, "inline_data", None) or getattr(p, "inlineData", None)
+                data = getattr(inline, "data", None) if inline else None
+                if data:
+                    return data
+
+    return None
 
 
 def generate_nanobanana_image_png_bytes(
-    client: genai.Client,
+    gemini_client: Any,
     model: str,
     prompt: str,
+    *,
+    retries: int = 3,
+    sleep_sec: float = 1.2,
 ) -> bytes:
     """
-    NanoBanana(Gemini) 이미지 생성 → PNG bytes 반환
-    - 콜라주/분할 방지
-    - 1:1 정사각을 강하게 요구 (그래도 후처리에서 강제 고정 권장)
+    Gemini 이미지 생성 -> PNG bytes 반환
+    - 응답 구조가 달라도 inline_data(data)를 최대한 찾아서 디코딩
+    - 실패 시 재시도
     """
-    img_prompt = f"""
-Create ONE single scene illustration for a blog thumbnail.
-Hard constraints:
-- square (1:1)
-- SINGLE scene, SINGLE frame
-- NO collage, NO triptych, NO split panels, NO multiple images
-- NO grid, NO montage, NO storyboard
-- centered subject, clean background
-- no text, no watermark, no logo
-Style: clean minimal, soft light, high clarity
-Prompt: {prompt}
-"""
+    last_err = None
 
-    resp = client.models.generate_content(
-        model=model,
-        contents=[img_prompt],
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-    )
+    for attempt in range(1, retries + 1):
+        try:
+            # ✅ SDK/버전에 따라 호출 방식이 다를 수 있어, 기존 코드의 호출을 최대한 유지합니다.
+            # 프로젝트에서 쓰던 방식이 generate_content 라면 아래 그대로 동작합니다.
+            resp = gemini_client.models.generate_content(
+                model=model,
+                contents=prompt,
+            )
 
-    # candidates 경로
-    candidates = getattr(resp, "candidates", None)
-    if candidates:
-        for cand in candidates:
-            content = getattr(cand, "content", None)
-            if not content:
-                continue
-            parts = getattr(content, "parts", None) or []
-            for part in parts:
-                inline = getattr(part, "inline_data", None)
-                if inline and getattr(inline, "data", None):
-                    data = inline.data
-                    if isinstance(data, (bytes, bytearray)):
-                        return bytes(data)
-                    if isinstance(data, str):
-                        import base64
-                        return base64.b64decode(data)
+            b64 = _extract_inline_image_b64(resp)
+            if not b64:
+                # 디버그용: 응답 요약 찍기(너무 길면 잘림)
+                text = str(resp)
+                print("🧩 Gemini raw resp (head):", text[:800])
+                raise RuntimeError("Gemini 응답에서 이미지 데이터(inline_data.data)를 찾지 못했습니다.")
 
-    # 혹시 resp.parts 형태
-    parts = getattr(resp, "parts", None)
-    if parts:
-        for part in parts:
-            inline = getattr(part, "inline_data", None)
-            if inline and getattr(inline, "data", None):
-                data = inline.data
-                if isinstance(data, (bytes, bytearray)):
-                    return bytes(data)
-                if isinstance(data, str):
-                    import base64
-                    return base64.b64decode(data)
+            # base64 -> bytes
+            img_bytes = base64.b64decode(b64)
+            if not img_bytes or len(img_bytes) < 1000:
+                raise RuntimeError("Gemini 이미지 바이트가 비정상적으로 작습니다.")
 
-    raise RuntimeError("Gemini 응답에서 이미지 데이터를 찾지 못했습니다.")
+            return img_bytes
+
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ Gemini 이미지 생성 실패 {attempt}/{retries}: {e}")
+            if attempt < retries:
+                time.sleep(sleep_sec * attempt)
+
+    raise RuntimeError(f"Gemini 이미지 생성 최종 실패: {last_err}")
