@@ -21,7 +21,7 @@ from app.keyword_picker import pick_keyword_by_naver
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 
-# ✅ 쿠팡 삽입 (문자열/튜플 반환 모두 대응)
+# ✅ 쿠팡 (반환이 tuple: (html, inserted))
 from app.monetize_coupang import inject_coupang
 
 
@@ -34,47 +34,6 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     if not prefix:
         prefix = "img"
     return f"{prefix}-{uid}.{ext}"
-
-
-def _apply_coupang_and_disclosure(base_html: str, keyword: str) -> tuple[str, bool]:
-    """
-    inject_coupang 반환이
-      - str 이면: (html, 삽입여부는 diff로 판단)
-      - tuple/list 이면: (html, inserted) 형태로 해석
-    """
-    out = inject_coupang(base_html, keyword=keyword)
-
-    if isinstance(out, (tuple, list)):
-        # (html, inserted) or (html, something...) 형태 대응
-        html = out[0] if len(out) >= 1 else base_html
-        inserted = bool(out[1]) if len(out) >= 2 else (html != base_html)
-        return html, inserted
-
-    # 문자열 반환
-    html = out
-    inserted = (html != base_html)
-    return html, inserted
-
-
-def _prepend_disclosure(html: str, disclosure_text: str) -> str:
-    """
-    formatter_v2가 <div class="wrap"> 를 가진다는 가정.
-    없으면 본문 최상단에 그냥 추가.
-    """
-    box = (
-        "<div class='disclosure' "
-        "style='margin:12px 0 14px; padding:12px 14px; border:1px solid #e5e7eb; "
-        "background:#f8fafc; border-radius:12px; font-size:14px; line-height:1.6; color:#111827;'>"
-        f"{disclosure_text}"
-        "</div>"
-    )
-
-    marker = '<div class="wrap">'
-    if marker in html:
-        return html.replace(marker, marker + "\n  " + box, 1)
-
-    # fallback
-    return box + "\n" + html
 
 
 def run() -> None:
@@ -117,15 +76,9 @@ def run() -> None:
     # 4) 이미지 2장 생성 (1:1 + 콜라주 방지)
     hero_prompt = (post.get("img_prompt") or "").strip()
     if not hero_prompt:
-        hero_prompt = (
-            f"{keyword} 주제의 건강 정보 블로그 삽화, "
-            "single scene, no collage, no text, square 1:1"
-        )
+        hero_prompt = f"{keyword} 주제의 건강 정보 블로그 삽화, single scene, no collage, no text, square 1:1"
 
-    body_prompt = (
-        hero_prompt
-        + ", single scene, no collage, different composition, different angle, no text, square 1:1"
-    )
+    body_prompt = hero_prompt + ", single scene, no collage, different composition, different angle, no text, square 1:1"
 
     print("🎨 Gemini 이미지(상단/대표) 생성 중...")
     hero_img = generate_nanobanana_image_png_bytes(
@@ -140,7 +93,7 @@ def run() -> None:
     hero_img = to_square_1024(hero_img)
     body_img = to_square_1024(body_img)
 
-    # 5) 대표 이미지에 타이틀 오버레이(짧은 타이틀만)
+    # 5) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
     hero_img_titled = to_square_1024(hero_img_titled)
 
@@ -155,9 +108,7 @@ def run() -> None:
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
 
-    # ==========================================================
-    # ✅ A안 레이아웃: formatter_v2로 “완성 HTML” 만들기
-    # ==========================================================
+    # 7) ✅ A안 레이아웃 HTML 생성
     sections = post.get("sections") or []
     outro = post.get("outro") or ""
 
@@ -166,7 +117,7 @@ def run() -> None:
         keyword=keyword,
         hero_url=hero_url,
         body_url=body_url,
-        disclosure_html="",  # 쿠팡 들어가면 아래에서 "최상단"에 붙임
+        disclosure_html="",  # 쿠팡은 monetize_coupang에서 최상단 삽입 처리
         summary_bullets=post.get("summary_bullets") or None,
         sections=sections if isinstance(sections, list) else [],
         warning_bullets=post.get("warning_bullets") or None,
@@ -174,23 +125,17 @@ def run() -> None:
         outro=outro,
     )
 
-    # 7) 쿠팡 박스 삽입 + (삽입된 경우에만) 대가성 문구 최상단
-    html_after_coupang, coupang_inserted = _apply_coupang_and_disclosure(html, keyword)
+    # 8) ✅ 쿠팡 삽입 (실제로 들어간 글만 disclosure 자동 삽입됨)
+    html, coupang_inserted = inject_coupang(html, keyword=keyword)
+    print("🟩 coupang_inserted:", coupang_inserted)
 
-    if coupang_inserted:
-        disclosure = "이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
-        html_after_coupang = _prepend_disclosure(html_after_coupang, disclosure)
-
-    html = html_after_coupang
-
-    # 8) ✅ 애드센스 수동 광고 3개 삽입 (요약박스 위 / 소제목 카드 위 / 맨 아래)
-    # - inject_adsense_slots 내부에서 원하는 위치에 3개를 박도록 구현되어 있어야 합니다.
+    # 9) ✅ 애드센스 수동 광고 3개 자동 삽입
     html = inject_adsense_slots(html)
 
-    # 9) publish_to_wp가 content_html을 우선 사용하도록 본문 교체
+    # 10) publish_to_wp가 content_html을 사용하도록 본문 교체
     post["content_html"] = html
 
-    # 10) WP 글 발행
+    # 11) WP 글 발행
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -201,7 +146,7 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
-    # 11) 히스토리 저장
+    # 12) 히스토리 저장
     state = add_history_item(
         state,
         {
