@@ -50,28 +50,27 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    ✅ 최우선: data["content_html"] 가 있으면 그걸 그대로 발행
-    - (중복 방지) content_html 사용 시, 여기서 상단/중간 이미지 삽입 로직 절대 안 함
-    - featured_media 지정만 수행
+    ✅ 최우선: data["content_html"]가 있으면 그걸 '그대로' 발행
+    - 여기서 다시 문단 조립/이미지 삽입을 하면 스타일이 깨집니다.
 
-    ✅ fallback: content_html 없을 때만 예전 방식(상단+중간 이미지 + 문단) 사용
+    ✅ fallback: content_html 없을 때만 간단 조립(안전망)
     """
     wp_url = wp_url.rstrip("/")
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    title = data.get("title", "") or ""
+    title = (data.get("title") or "").strip()
 
-    # ==========================
-    # 1) content_html 우선 사용
-    # ==========================
+    # =====================================================
+    # ✅ 0) 마지막 점검: content_html 우선 (가장 중요)
+    # =====================================================
     content_html = (data.get("content_html") or "").strip()
     if content_html:
         final_html = content_html
-
-    # ==========================
-    # 2) fallback: 기존 방식
-    # ==========================
+        print("✅ publish_to_wp: content_html 사용(스타일 유지)")
     else:
+        # ---------------------
+        # fallback 조립(최소)
+        # ---------------------
         raw_text = (data.get("content") or data.get("body") or "").strip()
         raw_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
         if not raw_paras:
@@ -107,6 +106,8 @@ def publish_to_wp(
 </div>
 """.strip()
 
+        print("⚠️ publish_to_wp: content_html 없음 → fallback 조립 사용")
+
     payload = {
         "title": title,
         "content": final_html,
@@ -117,6 +118,7 @@ def publish_to_wp(
     print("📝 POST ->", api_endpoint)
     print("📝 title ->", (title or "")[:80])
     print("📝 content length ->", len(final_html))
+    print("📝 featured_media ->", featured_media_id)
 
     res = requests.post(api_endpoint, auth=(wp_user, wp_pw), json=payload, timeout=timeout)
     print("📝 WP status:", res.status_code)
