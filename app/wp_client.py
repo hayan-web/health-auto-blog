@@ -1,3 +1,4 @@
+# app/wp_client.py
 import requests
 
 
@@ -12,13 +13,25 @@ def upload_media_to_wp(
     """
     WP 미디어 업로드 (RAW binary + headers 방식: 415 방지)
     반환: (source_url, media_id)
+
+    ✅ WP/플러그인/테마 환경에 따라 source_url 키가 없거나 비어있는 경우가 있어
+       guid.rendered / media_details.sizes.full.source_url 까지 fallback 처리
     """
     wp_url = wp_url.rstrip("/")
     media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
 
+    # 파일 확장자 기반으로 Content-Type 보정(서버가 확장자 보고 처리하는 경우가 있음)
+    lower = (filename or "").lower()
+    if lower.endswith(".jpg") or lower.endswith(".jpeg"):
+        ctype = "image/jpeg"
+    elif lower.endswith(".webp"):
+        ctype = "image/webp"
+    else:
+        ctype = "image/png"
+
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": "image/png",
+        "Content-Type": ctype,
     }
 
     res = requests.post(
@@ -36,7 +49,21 @@ def upload_media_to_wp(
         raise RuntimeError(f"미디어 업로드 실패: {res.status_code} / {res.text}")
 
     j = res.json()
-    return j["source_url"], j["id"]
+    media_id = j.get("id")
+
+    # ✅ URL fallback
+    url = (
+        j.get("source_url")
+        or (j.get("guid") or {}).get("rendered")
+        or (((j.get("media_details") or {}).get("sizes") or {}).get("full") or {}).get("source_url")
+    )
+
+    if not media_id or not url or not str(url).startswith("http"):
+        raise RuntimeError(
+            f"미디어 업로드는 성공했지만 URL 파싱 실패. id={media_id}, url={url}, keys={list(j.keys())}"
+        )
+
+    return str(url), int(media_id)
 
 
 def publish_to_wp(
@@ -50,75 +77,37 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    ✅ 최우선: data["content_html"]가 있으면 그걸 '그대로' 발행
-    - 여기서 다시 문단 조립/이미지 삽입을 하면 스타일이 깨집니다.
-
-    ✅ fallback: content_html 없을 때만 간단 조립(안전망)
+    ✅ content_html이 있으면 그걸 그대로 사용(포맷터 스타일 유지)
+    - 이미지 2장: 포맷터가 이미 넣었으면 중복 삽입 안 함
+    - featured_media 지정
+    반환: post_id
     """
     wp_url = wp_url.rstrip("/")
-    api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    title = (data.get("title") or "").strip()
-
-    # =====================================================
-    # ✅ 0) 마지막 점검: content_html 우선 (가장 중요)
-    # =====================================================
-    content_html = (data.get("content_html") or "").strip()
-    if content_html:
-        final_html = content_html
-        print("✅ publish_to_wp: content_html 사용(스타일 유지)")
-    else:
-        # ---------------------
-        # fallback 조립(최소)
-        # ---------------------
-        raw_text = (data.get("content") or data.get("body") or "").strip()
-        raw_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
-        if not raw_paras:
-            raw_paras = ["(본문이 비어 있어 기본 문구로 대체되었습니다.)"]
-
-        mid_idx = max(1, len(raw_paras) // 2)
+    # ✅ formatter_v2 결과를 최우선으로 사용
+    final_html = (data.get("content_html") or "").strip()
+    if not final_html:
+        # fallback: 기존 content를 단순 p로라도 감싸서 발행
+        raw = (data.get("content") or data.get("body") or "").strip()
+        if not raw:
+            raise RuntimeError("본문(content/content_html)이 비어 있습니다.")
+        paras = [p.strip() for p in raw.split("\n") if p.strip()]
 
         def ptag(p: str) -> str:
-            return f"<p style='margin:0 0 14px; font-size:17px; line-height:1.85; letter-spacing:-0.2px; color:#222;'>{p}</p>"
+            return f"<p>{p}</p>"
 
-        top_html = f"""
-<div style="margin-bottom:22px;">
-  <img src="{hero_url}" alt="{title}" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.12);" />
-</div>
-""".strip()
+        final_html = "\n".join(ptag(p) for p in paras)
 
-        mid_img_html = f"""
-<div style="margin:22px 0;">
-  <img src="{body_url}" alt="{title} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.10);" />
-</div>
-""".strip()
-
-        body_parts = []
-        for i, p in enumerate(raw_paras):
-            if i == mid_idx:
-                body_parts.append(mid_img_html)
-            body_parts.append(ptag(p))
-
-        final_html = f"""
-{top_html}
-<div style="line-height:1.85; font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;">
-  {''.join(body_parts)}
-</div>
-""".strip()
-
-        print("⚠️ publish_to_wp: content_html 없음 → fallback 조립 사용")
-
+    api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
     payload = {
-        "title": title,
+        "title": data.get("title", ""),
         "content": final_html,
         "status": "publish",
         "featured_media": featured_media_id,
     }
 
     print("📝 POST ->", api_endpoint)
-    print("📝 title ->", (title or "")[:80])
-    print("📝 content length ->", len(final_html))
-    print("📝 featured_media ->", featured_media_id)
+    print("📝 title ->", (payload["title"] or "")[:80])
 
     res = requests.post(api_endpoint, auth=(wp_user, wp_pw), json=payload, timeout=timeout)
     print("📝 WP status:", res.status_code)
