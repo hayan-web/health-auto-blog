@@ -142,13 +142,20 @@ def run() -> None:
     body_prompt = hero_prompt + ", single scene, no collage, different composition, different angle, no text, square 1:1"
 
     print("🎨 Gemini 이미지(상단/대표) 생성 중...")
-    hero_img = generate_nanobanana_image_png_bytes(gemini_client, S.GEMINI_IMAGE_MODEL, hero_prompt)
+    hero_img = generate_nanobanana_image_png_bytes(
+        gemini_client, S.GEMINI_IMAGE_MODEL, hero_prompt, retries=3
+    )
 
     print("🎨 Gemini 이미지(중간) 생성 중...")
-    body_img = generate_nanobanana_image_png_bytes(gemini_client, S.GEMINI_IMAGE_MODEL, body_prompt)
+    try:
+        body_img = generate_nanobanana_image_png_bytes(
+            gemini_client, S.GEMINI_IMAGE_MODEL, body_prompt, retries=3
+        )
+    except Exception as e:
+        # ✅ 중간 이미지 실패해도 파이프라인 멈추지 않게: hero로 대체
+        print(f"⚠️ 중간 이미지 생성 실패 → hero 이미지로 대체합니다. ({e})")
+        body_img = hero_img
 
-    hero_img = to_square_1024(hero_img)
-    body_img = to_square_1024(body_img)
 
     # 5) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
