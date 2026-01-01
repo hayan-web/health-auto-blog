@@ -56,13 +56,18 @@ def generate_blog_post(
     model: str,
     keyword: str,
 ) -> Dict[str, Any]:
+    """
+    GPT-5 / GPT-5-mini 대응 버전
+    - temperature/top_p 미전송 (모델 제약)
+    - JSON 구조 강제
+    """
+
     resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT_TEMPLATE.format(keyword=keyword)},
         ],
-        temperature=0.6,
         response_format={"type": "json_object"},
     )
 
@@ -81,6 +86,7 @@ def generate_blog_post(
         "checklist_bullets",
         "outro",
     ]
+
     for k in required:
         if k not in data:
             raise ValueError(f"OpenAI JSON 누락 필드: {k}")
@@ -96,6 +102,11 @@ def generate_thumbnail_title(
     model: str,
     title: str,
 ) -> str:
+    """
+    썸네일용 초단문 타이틀
+    - GPT-5 대응: temperature 미사용
+    """
+
     resp = client.chat.completions.create(
         model=model,
         messages=[
@@ -105,7 +116,6 @@ def generate_thumbnail_title(
             },
             {"role": "user", "content": title},
         ],
-        temperature=0.4,
     )
 
     return resp.choices[0].message.content.strip()
