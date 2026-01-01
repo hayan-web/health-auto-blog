@@ -1,108 +1,111 @@
+# app/ai_openai.py
+from __future__ import annotations
 import json
-import re
+from typing import Any, Dict
+
 from openai import OpenAI
 
 
-def _strip_code_fence(text: str) -> str:
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`").strip()
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    return t
+def make_openai_client(api_key: str) -> OpenAI:
+    return OpenAI(api_key=api_key)
 
 
-def make_openai_client(openai_api_key: str) -> OpenAI:
-    return OpenAI(api_key=openai_api_key)
+SYSTEM_PROMPT = """
+너는 '블로그 글 작성자'가 아니다.
+너의 역할은 '정보형 블로그 콘텐츠를 구성하는 데이터 생성기'다.
+
+❗ 절대 줄글을 쓰지 마라.
+❗ 감정 표현, 인사말, 서론 멘트 금지.
+❗ 반드시 JSON만 출력한다.
+
+출력 형식은 아래 스키마를 100% 따른다.
+
+{
+  "title": string,
+  "img_prompt": string,
+  "summary_bullets": string[],
+  "sections": [
+    {
+      "title": string,
+      "body": string,
+      "bullets": string[]
+    }
+  ],
+  "warning_bullets": string[],
+  "checklist_bullets": string[],
+  "outro": string
+}
+"""
+
+USER_PROMPT_TEMPLATE = """
+주제 키워드: "{keyword}"
+
+요구사항:
+- title: 검색 최적화된 자연스러운 제목
+- img_prompt: 단일 장면, 콜라주 없음, 텍스트 없음
+- summary_bullets: 3~5개
+- sections: 5~7개 (각각 title/body/bullets 2~4개)
+- warning_bullets: 2~4개
+- checklist_bullets: 3~5개
+- outro: 2~3문장 요약 정리
+"""
 
 
 def generate_blog_post(
     client: OpenAI,
     model: str,
     keyword: str,
-) -> dict:
-    prompt = f"""
-당신은 한국어 블로그 글 작성 도우미입니다.
+) -> Dict[str, Any]:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": USER_PROMPT_TEMPLATE.format(keyword=keyword)},
+        ],
+        temperature=0.6,
+        response_format={"type": "json_object"},
+    )
 
-아래 형식의 JSON "객체(Object)" 로만 응답하세요.
-- JSON 배열([]) 금지
-- JSON 외 텍스트(설명/코드펜스/추가문장) 금지
+    content = resp.choices[0].message.content
+    data = json.loads(content)
 
-출력 형식(키 3개 고정):
-{{
-  "title": "제목",
-  "content": "본문(문단은 \\n\\n 로 구분)",
-  "img_prompt": "대표 이미지 생성용 프롬프트(영문 권장)"
-}}
+    # =========================
+    # 최소 검증 (안전망)
+    # =========================
+    required = [
+        "title",
+        "img_prompt",
+        "summary_bullets",
+        "sections",
+        "warning_bullets",
+        "checklist_bullets",
+        "outro",
+    ]
+    for k in required:
+        if k not in data:
+            raise ValueError(f"OpenAI JSON 누락 필드: {k}")
 
-작성 규칙:
-- 제목 40~60자
-- 본문 1500자 전후(±20%), 소제목 포함
-- 과장/허위/의학적 단정 금지(일반 정보 수준)
-- 문단은 \\n\\n 로 나눠 작성
-- 마지막에 “참고하면 좋은 습관 3가지” 소제목 + 체크리스트 정리
+    if not isinstance(data.get("sections"), list) or len(data["sections"]) < 3:
+        raise ValueError("sections 수 부족")
 
-타겟:
-- 40~50대 한국 독자
-
-이번 글의 핵심 키워드(주제):
-- {keyword}
-
-요청:
-- 위 키워드를 중심으로 “실천 가능한 건강관리/생활습관” 글을 작성하세요.
-- 이미지 프롬프트는 1:1 썸네일에 어울리는 ‘한 장면’ 일러스트로 작성(텍스트 없음).
-"""
-
-    last_err = None
-    for attempt in range(1, 3):
-        try:
-            print(f"🧠 OpenAI 글 생성 시도: {model} (attempt {attempt}) / 키워드: {keyword}")
-            resp = client.responses.create(model=model, input=prompt)
-            text = _strip_code_fence(resp.output_text)
-            data = json.loads(text)
-
-            if not isinstance(data, dict):
-                raise ValueError(f"JSON이 객체가 아닙니다: {type(data)}")
-
-            if not data.get("title") or not data.get("content"):
-                raise ValueError("JSON 필수 필드(title/content) 누락")
-
-            if not data.get("img_prompt"):
-                data["img_prompt"] = (
-                    "health lifestyle illustration, korean middle-aged audience, "
-                    "clean minimal, soft light, single scene, no text"
-                )
-
-            # 키워드도 같이 보관(나중에 state에 저장)
-            data["keyword"] = keyword
-            return data
-        except Exception as e:
-            last_err = e
-            print(f"⚠️ OpenAI 글 생성 실패 (attempt {attempt}): {e}")
-
-    raise RuntimeError(f"OpenAI 글 생성 최종 실패: {last_err}")
+    return data
 
 
 def generate_thumbnail_title(
     client: OpenAI,
     model: str,
-    full_title: str,
+    title: str,
 ) -> str:
-    prompt = f"""
-아래 블로그 제목을 보고,
-썸네일 이미지에 넣을 짧은 제목을 만들어주세요.
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "너는 썸네일용 초단문 제목 생성기다. 10자 이내로 핵심만 남겨라.",
+            },
+            {"role": "user", "content": title},
+        ],
+        temperature=0.4,
+    )
 
-조건:
-- 10~16자 이내
-- 핵심 키워드만 남기기
-- 조사/부사 최소화
-- 감탄사, 특수문자 금지
-- 출력은 텍스트 한 줄만
-
-원제목:
-{full_title}
-"""
-    resp = client.responses.create(model=model, input=prompt)
-    t = (resp.output_text or "").strip()
-    t = re.sub(r"[\r\n]+", " ", t).strip()
-    return t[:18].strip()
+    return resp.choices[0].message.content.strip()
