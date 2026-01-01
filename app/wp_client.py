@@ -9,6 +9,10 @@ def upload_media_to_wp(
     filename: str,
     timeout: int = 60,
 ) -> tuple[str, int]:
+    """
+    WP 미디어 업로드 (RAW binary + headers 방식: 415 방지)
+    반환: (source_url, media_id)
+    """
     wp_url = wp_url.rstrip("/")
     media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
 
@@ -46,59 +50,73 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    ✅ 핵심 변경:
-    - data["content_html"]가 있으면 그걸 그대로 content로 사용 (스타일 적용됨)
-    - 없을 때만 fallback으로 기존 단순 조립
+    ✅ 최우선: data["content_html"] 가 있으면 그걸 그대로 발행
+    - (중복 방지) content_html 사용 시, 여기서 상단/중간 이미지 삽입 로직 절대 안 함
+    - featured_media 지정만 수행
+
+    ✅ fallback: content_html 없을 때만 예전 방식(상단+중간 이미지 + 문단) 사용
     """
     wp_url = wp_url.rstrip("/")
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    # ✅ 1) content_html 우선
-    if data.get("content_html"):
-        final_html = data["content_html"]
+    title = data.get("title", "") or ""
+
+    # ==========================
+    # 1) content_html 우선 사용
+    # ==========================
+    content_html = (data.get("content_html") or "").strip()
+    if content_html:
+        final_html = content_html
+
+    # ==========================
+    # 2) fallback: 기존 방식
+    # ==========================
     else:
-        # fallback: 최소한의 기본 구성 (예전 방식)
-        raw_paras = [p.strip() for p in (data.get("content") or "").split("\n") if p.strip()]
+        raw_text = (data.get("content") or data.get("body") or "").strip()
+        raw_paras = [p.strip() for p in raw_text.split("\n") if p.strip()]
         if not raw_paras:
-            raise RuntimeError("본문(content)이 비어 있습니다.")
+            raw_paras = ["(본문이 비어 있어 기본 문구로 대체되었습니다.)"]
 
         mid_idx = max(1, len(raw_paras) // 2)
 
         def ptag(p: str) -> str:
-            return f"<p style='margin-bottom:1.6em; font-size:18px; color:#333;'>{p}</p>"
+            return f"<p style='margin:0 0 14px; font-size:17px; line-height:1.85; letter-spacing:-0.2px; color:#222;'>{p}</p>"
 
         top_html = f"""
-<div style="margin-bottom:28px;">
-  <img src="{hero_url}" alt="{data.get("title","")}" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.14);" />
+<div style="margin-bottom:22px;">
+  <img src="{hero_url}" alt="{title}" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.12);" />
 </div>
-"""
+""".strip()
+
         mid_img_html = f"""
-<div style="margin:28px 0;">
-  <img src="{body_url}" alt="{data.get("title","")} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 4px 14px rgba(0,0,0,0.12);" />
+<div style="margin:22px 0;">
+  <img src="{body_url}" alt="{title} 관련 이미지" style="width:100%; border-radius:14px; box-shadow:0 6px 18px rgba(0,0,0,0.10);" />
 </div>
-"""
+""".strip()
+
         body_parts = []
-        for i, ptxt in enumerate(raw_paras):
+        for i, p in enumerate(raw_paras):
             if i == mid_idx:
                 body_parts.append(mid_img_html)
-            body_parts.append(ptag(ptxt))
+            body_parts.append(ptag(p))
 
         final_html = f"""
 {top_html}
-<div style="line-height:1.9; font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;">
+<div style="line-height:1.85; font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;">
   {''.join(body_parts)}
 </div>
-"""
+""".strip()
 
     payload = {
-        "title": data.get("title", ""),
+        "title": title,
         "content": final_html,
         "status": "publish",
         "featured_media": featured_media_id,
     }
 
     print("📝 POST ->", api_endpoint)
-    print("📝 title ->", (payload["title"] or "")[:80])
+    print("📝 title ->", (title or "")[:80])
+    print("📝 content length ->", len(final_html))
 
     res = requests.post(api_endpoint, auth=(wp_user, wp_pw), json=payload, timeout=timeout)
     print("📝 WP status:", res.status_code)
