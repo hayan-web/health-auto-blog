@@ -46,6 +46,12 @@ jobs:
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: python main.py
 
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-html
+          path: preview/*.html 
+
       - name: Save state cache
         if: always()
         uses: actions/cache@v4
