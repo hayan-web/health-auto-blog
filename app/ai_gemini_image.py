@@ -2,6 +2,17 @@ import base64
 import time
 from typing import Any, Optional
 
+from google import genai
+
+
+def make_gemini_client(api_key: str) -> Any:
+    """
+    Gemini Client 생성 (google-genai SDK)
+    """
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY가 비어 있습니다.")
+    return genai.Client(api_key=api_key)
+
 
 def _extract_inline_image_b64(resp: Any) -> Optional[str]:
     """
@@ -20,7 +31,6 @@ def _extract_inline_image_b64(resp: Any) -> Optional[str]:
                     return data
 
     # 2) 객체 형태(SDK response)
-    # resp.candidates[*].content.parts[*].inline_data.data
     candidates = getattr(resp, "candidates", None)
     if candidates:
         for c in candidates:
@@ -54,8 +64,6 @@ def generate_nanobanana_image_png_bytes(
 
     for attempt in range(1, retries + 1):
         try:
-            # ✅ SDK/버전에 따라 호출 방식이 다를 수 있어, 기존 코드의 호출을 최대한 유지합니다.
-            # 프로젝트에서 쓰던 방식이 generate_content 라면 아래 그대로 동작합니다.
             resp = gemini_client.models.generate_content(
                 model=model,
                 contents=prompt,
@@ -63,12 +71,10 @@ def generate_nanobanana_image_png_bytes(
 
             b64 = _extract_inline_image_b64(resp)
             if not b64:
-                # 디버그용: 응답 요약 찍기(너무 길면 잘림)
                 text = str(resp)
                 print("🧩 Gemini raw resp (head):", text[:800])
                 raise RuntimeError("Gemini 응답에서 이미지 데이터(inline_data.data)를 찾지 못했습니다.")
 
-            # base64 -> bytes
             img_bytes = base64.b64decode(b64)
             if not img_bytes or len(img_bytes) < 1000:
                 raise RuntimeError("Gemini 이미지 바이트가 비정상적으로 작습니다.")
