@@ -42,6 +42,22 @@ from app.preview import save_html_preview
 S = Settings()
 
 
+def to_jpg_bytes(img_bytes: bytes, quality: int = 92) -> bytes:
+    """
+    PNG/기타 바이트를 JPG로 변환 (Imsanity의 PNG->JPG 리네임으로 URL 깨지는 문제 방지)
+    PIL 없으면 원본 그대로 반환(그 경우 Imsanity 설정에서 'convert to JPG'는 꺼야 함)
+    """
+    try:
+        from PIL import Image  # type: ignore
+        from io import BytesIO
+
+        im = Image.open(BytesIO(img_bytes)).convert("RGB")
+        out = BytesIO()
+        im.save(out, format="JPEG", quality=quality, optimize=True)
+        return out.getvalue()
+    except Exception:
+        return img_bytes
+
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
     prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
@@ -214,8 +230,12 @@ def run() -> None:
     hero_img_titled = to_square_1024(hero_img_titled)
 
     # 6) WP 미디어 업로드
-    hero_name = make_ascii_filename("featured", "png")
-    body_name = make_ascii_filename("body", "png")
+    # JPG로 변환해서 업로드 (URL 리네임 방지)
+    hero_img_titled = to_jpg_bytes(hero_img_titled)
+    body_img = to_jpg_bytes(body_img)
+
+    hero_name = make_ascii_filename("featured", "jpg")
+    body_name = make_ascii_filename("body", "jpg")
 
     hero_url, hero_media_id = upload_media_to_wp(
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
@@ -223,6 +243,9 @@ def run() -> None:
     body_url, _ = upload_media_to_wp(
         S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
+
+    print("🧷 hero_url =", hero_url)
+    print("🧷 body_url =", body_url)
 
     # 7) A안 레이아웃 HTML 생성
     sections = post.get("sections") or []
