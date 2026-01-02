@@ -70,20 +70,24 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
 def _fallback_png_bytes(text: str) -> bytes:
     try:
         from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
         try:
             font = ImageFont.truetype("DejaVuSans.ttf", 48)
         except Exception:
             font = ImageFont.load_default()
+
         msg = (text or "image").strip()[:40]
         box = draw.textbbox((0, 0), msg, font=font)
         w, h = box[2] - box[0], box[3] - box[1]
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
+
         from io import BytesIO
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
+
     except Exception:
         return base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
@@ -136,23 +140,36 @@ def run() -> None:
     S = Settings()
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
-    img_client = make_gemini_client(S.OPENAI_API_KEY)
+
+    # ⚠️ 프로젝트 구조 유지: ai_gemini_image 내부가 OpenAI 이미지 래퍼면 OPENAI 키가 맞습니다.
+    # 진짜 Gemini면 GOOGLE_API_KEY를 넣어야 합니다(여기서만 바꾸면 됨).
+    img_key = getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
+    img_client = make_gemini_client(img_key)
 
     state = load_state()
 
     # ✅ 클릭 로그 반영(기존)
     state = ingest_click_log(state, S.WP_URL)
+
     # ✅ (있으면) post_metrics 기반으로 생활 하위주제 클릭 아주 보수 업데이트
     state = try_update_from_post_metrics(state)
 
     history = state.get("history", [])
 
-    # 0) 가드레일
+    # 0) 가드레일: "자동 발행 우선"이면 초과 시에도 런이 죽지 않게 옵션 처리
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-    check_limits_or_raise(state, cfg)
+
+    allow_over_budget = bool(int(getattr(S, "ALLOW_OVER_BUDGET", 1)))  # 기본 1(허용)
+    if allow_over_budget:
+        try:
+            check_limits_or_raise(state, cfg)
+        except Exception as e:
+            print(f"⚠️ 가드레일 초과(허용 모드) → 계속 진행: {e}")
+    else:
+        check_limits_or_raise(state, cfg)
 
     # 1) 키워드 선정
     keyword, _ = pick_keyword_by_naver(
@@ -171,15 +188,24 @@ def run() -> None:
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
-
-        # 글 방향에 아주 약하게 힌트 추가(기존 generate_blog_post가 prompt를 안 받아도 안전)
         keyword = f"{keyword} {life_subtopic}".strip()
 
     best_image_style, thumb_variant, _ = pick_best_publishing_combo(state, topic=topic)
 
     # 3) 글 생성 + 품질
     def _gen():
-        post = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+        # ✅ prompt 인자 지원/미지원 둘 다 안전
+        try:
+            post = generate_blog_post(
+                openai_client,
+                S.OPENAI_MODEL,
+                keyword,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        except TypeError:
+            post = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+
         dup, reason = pick_retry_reason(post.get("title", ""), history)
         if dup:
             post["sections"] = []
@@ -243,7 +269,6 @@ def run() -> None:
     # ✅ 쿠팡은 "생활(topic=life)"에서만
     coupang_inserted = False
     if topic == "life":
-        # should_inject_coupang 시그니처가 달라도 깨지지 않게 TypeError 안전 처리
         try:
             allow, _reason = should_inject_coupang(state, topic=topic, keyword=keyword, post=post, subtopic=life_subtopic)
         except TypeError:
@@ -251,7 +276,6 @@ def run() -> None:
 
         if allow:
             html = inject_coupang(html, keyword=keyword)
-            # 최상단 대가성 문구(쿠팡이 실제로 들어간 글에만)
             html = html.replace(
                 '<div class="wrap">',
                 '<div class="wrap">\n<div class="disclosure">이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.</div>',
@@ -260,7 +284,7 @@ def run() -> None:
             state = increment_coupang_count(state)
             coupang_inserted = True
 
-    # ✅ 애드센스는 전 글 공통 (최대 효율: 슬롯 함수에서 위치 3개 유지)
+    # ✅ 애드센스는 전 글 공통
     html = inject_adsense_slots(html)
     post["content_html"] = html
 
@@ -282,13 +306,11 @@ def run() -> None:
     state = record_topic_thumb_impression(state, topic, thumb_variant)
     state = update_topic_thumb_score(state, topic, thumb_variant)
 
-    # ✅ NEW: 생활 하위주제 노출 기록 (쿠팡 삽입 여부와 무관하게 life면 1회 기록)
     if topic == "life" and life_subtopic:
         state = record_life_subtopic_impression(state, life_subtopic, n=1)
 
     increment_post_count(state)
 
-    # 쿨다운(기존)
     rule = CooldownRule(
         min_impressions=int(getattr(S, "COOLDOWN_MIN_IMPRESSIONS", 120)),
         ctr_floor=float(getattr(S, "COOLDOWN_CTR_FLOOR", 0.0025)),
@@ -296,7 +318,6 @@ def run() -> None:
     )
     state = apply_cooldown_rules(state, topic=topic, img=image_style, tv=thumb_variant, rule=rule)
 
-    # 히스토리 저장
     state = add_history_item(
         state,
         {
@@ -307,7 +328,6 @@ def run() -> None:
             "thumb_variant": thumb_variant,
             "image_style": image_style,
             "topic": topic,
-            # ✅ NEW: 생활 하위주제 추적
             "life_subtopic": life_subtopic,
             "coupang_inserted": coupang_inserted,
         },
