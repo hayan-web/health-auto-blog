@@ -349,15 +349,26 @@ except TypeError:
     post["content_html"] = html
 
     # 11) WP 글 발행
-    post_id = publish_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        post,
-        hero_url,
-        body_url,
-        featured_media_id=hero_media_id,
-    )
+    try:
+        post_id = publish_to_wp(
+            S.WP_URL,
+            S.WP_USERNAME,
+            S.WP_APP_PASSWORD,
+            post,
+            hero_url,
+            body_url,
+            featured_media_id=hero_media_id,
+        )
+    except Exception as e:
+        print(f"❌ WP 발행 실패 → 키워드 블랙리스트: {keyword}")
+        state = add_blacklist(
+            state,
+            keyword,
+            days=1,
+            reason=f"wp_publish_failed: {e}",
+        )
+        save_state(state)
+        return
 
     # ✅ 발행 카운트 증가(가드용) - 구현에 따라 state를 반환할 수도 있어 안전하게 처리
     try:
