@@ -116,7 +116,7 @@ def run() -> None:
     S = Settings()
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
-    img_client = make_gemini_client(S.GOOGLE_API_KEY)  # 내부는 OpenAI 이미지 client
+    img_client = make_gemini_client(S.OPENAI_API_KEY)  # 내부는 OpenAI 이미지 client
 
     state = load_state()
     history = state.get("history", [])
