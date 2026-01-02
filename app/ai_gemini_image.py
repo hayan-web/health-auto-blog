@@ -63,12 +63,13 @@ def generate_nanobanana_image_png_bytes(
     output_format: str = "png",
 ) -> bytes:
     """
-    OpenAI Responses API + image_generation tool로 이미지 생성 후 bytes 반환.
-    - model 파라미터는 main.py 호환용으로 그대로 받되,
-      실제 생성은 `responses.create(model=...)`에서 수행합니다.
-    - 결과는 base64 -> bytes 디코드 후 PNG/JPG 매직바이트로 검증합니다.
+    OpenAI 이미지 생성 후 bytes 반환.
 
-    참고: OpenAI 문서의 image_generation tool 방식 사용. :contentReference[oaicite:0]{index=0}
+    ✅ 안정성 우선:
+    - 일부 환경에서 Responses API의 image_generation tool 출력 파싱이 깨지거나
+      SDK 버전 차이로 result가 비어 fallback만 업로드되는 문제가 있었으므로,
+      여기서는 OpenAI Images API (`client.images.generate`)를 1순위로 사용합니다.
+    - model 파라미터는 호출부 호환을 위해 그대로 받습니다.
     """
     last_err: Optional[Exception] = None
 
@@ -76,23 +77,30 @@ def generate_nanobanana_image_png_bytes(
         try:
             client: OpenAI = gemini_client  # 이름만 gemini_client일 뿐, OpenAI client입니다.
 
-            resp = client.responses.create(
-                model=model or "gpt-5",
-                input=prompt,
-                tools=[
-                    {
-                        "type": "image_generation",
-                        "size": size,
-                        "quality": quality,
-                        "format": output_format,
-                    }
-                ],
-                tool_choice={"type": "image_generation"},
+            # OpenAI Images API
+            # - 최신 SDK에서는 `data[0].b64_json`로 base64가 옵니다.
+            resp = client.images.generate(
+                model=(model or "gpt-image-1"),
+                prompt=prompt,
+                size=size,
+                # quality는 SDK/모델에 따라 지원 여부가 달라서 best-effort로만 사용
+                # (미지원이면 예외가 날 수 있어 try/except가 감싸줍니다)
+                quality=quality,
             )
 
-            b64 = _extract_image_b64_from_responses(resp)
+            b64 = None
+            try:
+                # SDK object
+                b64 = getattr(resp.data[0], "b64_json", None)
+            except Exception:
+                b64 = None
+            if not b64 and isinstance(resp, dict):
+                try:
+                    b64 = resp["data"][0].get("b64_json")
+                except Exception:
+                    b64 = None
             if not b64:
-                raise RuntimeError("OpenAI 응답에서 이미지 base64(result)를 찾지 못했습니다.")
+                raise RuntimeError("OpenAI 이미지 응답에서 b64_json을 찾지 못했습니다.")
 
             img_bytes = base64.b64decode(b64)
 
