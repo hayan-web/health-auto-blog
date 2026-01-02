@@ -26,6 +26,7 @@ from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
 from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
+from app.click_ingest import ingest_click_log
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
@@ -143,6 +144,8 @@ def run() -> None:
     img_client = make_gemini_client(S.OPENAI_API_KEY)
 
     state = load_state()
+    # ✅ (10) 이전 클릭 로그 수집 → CTR 학습 반영
+    state = ingest_click_log(state, S.WP_URL)
     history = state.get("history", [])
 
     # -------------------------
