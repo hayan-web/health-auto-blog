@@ -27,6 +27,8 @@ from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 from app.monetize_coupang import inject_coupang
 
+# ✅ 시간대 기반 주제 분기
+from app.time_router import get_kst_hour, topic_by_kst_hour
 # ✅ NEW: 품질 점수/재생성
 from app.quality_gate import quality_retry_loop
 # ✅ NEW: 주제 분기
@@ -165,11 +167,19 @@ def run() -> None:
     print("🔎 선택된 키워드:", keyword)
     print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
 
-    # === (2) 주제 분기 프롬프트 ===
-    topic = guess_topic_from_keyword(keyword)
+    # === (2) 시간대 + 키워드 기반 주제 분기 ===
+    kst_hour = get_kst_hour()
+    time_topic = topic_by_kst_hour(kst_hour)
+
+    # 키워드 힌트가 강하면 keyword 기반, 아니면 시간대 우선
+    keyword_topic = guess_topic_from_keyword(keyword)
+    topic = time_topic or keyword_topic
+
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
-    print(f"🧭 topic: {topic}")
+
+    print(f"🧭 KST hour={kst_hour}, time_topic={time_topic}, keyword_topic={keyword_topic}")
+    print(f"🧭 final topic={topic}")
 
     # 2) 글 생성 + 중복 회피 + (1) 품질 점수화 재생성
     MAX_RETRY = 3
