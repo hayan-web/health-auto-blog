@@ -53,8 +53,14 @@ def _render_adsense(slot_value: str) -> str:
 
 
 def _maybe_include_script() -> str:
+    # 기본값은 "1"로 두어서(=포함) 헤더에 스크립트를 아직 못 넣은 상태에서도
+    # 본문 삽입 광고가 동작하게 합니다.
+    # 이미 테마/플러그인으로 <head>에 넣었다면 ADSENSE_INCLUDE_SCRIPT=0 으로 꺼주세요.
     include = _env("ADSENSE_INCLUDE_SCRIPT")
-    if include and include not in ("0", "false", "False", "FALSE"):
+    if include == "":
+        include = "1"
+
+    if include not in ("0", "false", "False", "FALSE"):
         client = _env("ADSENSE_CLIENT") or _env("GOOGLE_ADSENSE_CLIENT")
         if not client:
             return ""
