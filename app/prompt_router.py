@@ -82,8 +82,10 @@ def build_user_prompt(topic: str, keyword: str) -> str:
     topic = (topic or "life").strip().lower()
     kw = keyword.strip()
 
+    # ✅ 제목/본문에 특정 연령대(예: “30~50대”, “40대”, “50대”)가 직접 등장하면
+    # CTR/검색 유입에서 손해를 볼 수 있어 기본 프롬프트에서 제거합니다.
     if topic == "health":
-        return f"키워드: {kw}\n대상: 30~50대 일반인\n목표: 실천 가능한 건강 습관 가이드"
+        return f"키워드: {kw}\n대상: 일반 독자\n목표: 실천 가능한 건강 습관 가이드"
     if topic == "it":
-        return f"키워드: {kw}\n대상: 30~50대\n목표: 오류 해결/설정 튜토리얼"
-    return f"키워드: {kw}\n대상: 30~50대\n목표: 생활 문제 해결/꿀팁 가이드"
+        return f"키워드: {kw}\n대상: 일반 사용자\n목표: 오류 해결/설정 튜토리얼"
+    return f"키워드: {kw}\n대상: 일반 독자\n목표: 생활 문제 해결/꿀팁 가이드"
