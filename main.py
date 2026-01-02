@@ -26,6 +26,7 @@ from app.keyword_picker import pick_keyword_by_naver
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 from app.monetize_coupang import inject_coupang
+from app.seed_keywords import get_seed_keywords
 
 # ✅ 시간대 기반 주제 분기
 from app.time_router import get_kst_hour, topic_by_kst_hour
@@ -161,8 +162,28 @@ def run() -> None:
     check_limits_or_raise(state, cfg)
 
     # 1) 키워드 선정
+# (2) topic은 이미 time_router로 계산된 상태라고 가정
+seed_keywords = get_seed_keywords(topic)
+print("🧩 seed_keywords:", seed_keywords[:10], f"(총 {len(seed_keywords)}개)")
+
+# ✅ topic별 seed를 picker에 전달(지원하면)
+try:
     keyword, debug = pick_keyword_by_naver(
-        S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history
+        S.NAVER_CLIENT_ID,
+        S.NAVER_CLIENT_SECRET,
+        history,
+        seed_keywords=seed_keywords,
+    )
+except TypeError:
+    # ✅ picker가 아직 seed_keywords 인자를 지원 안 하면
+    # ENV를 임시로 덮어써서 기존 picker를 그대로 활용(틀 안 깨짐)
+    os.environ["NAVER_SEED_KEYWORDS"] = ",".join(seed_keywords)
+    keyword, debug = pick_keyword_by_naver(
+        S.NAVER_CLIENT_ID,
+        S.NAVER_CLIENT_SECRET,
+        history,
+    )
+
     )
     print("🔎 선택된 키워드:", keyword)
     print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
