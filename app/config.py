@@ -1,9 +1,8 @@
-# app/config.py
 import os
 
 
-def _get_env(name: str, required: bool = True, default: str = "") -> str:
-    v = os.getenv(name, default)
+def _get_env(name: str, required: bool = True) -> str:
+    v = os.getenv(name, "")
     v = v.strip() if isinstance(v, str) else ""
     if required and not v:
         raise RuntimeError(f"ENV 누락: {name}")
@@ -12,13 +11,16 @@ def _get_env(name: str, required: bool = True, default: str = "") -> str:
 
 class Settings:
     # -------------------------
-    # API Keys (OpenAI-only)
+    # API Keys
     # -------------------------
     OPENAI_API_KEY: str = _get_env("OPENAI_API_KEY", required=True)
 
-    # ✅ 이미지도 OpenAI로 통일: 따로 키를 쓰고 싶으면 IMAGE_API_KEY에 넣을 수 있게만 해둠(선택)
-    # - 미설정이면 OPENAI_API_KEY를 그대로 사용
-    IMAGE_API_KEY: str = _get_env("IMAGE_API_KEY", required=False, default="") or OPENAI_API_KEY
+    # Google(Gemini) 키는 **선택**
+    # (OpenAI-only 모드에서는 없어도 동작하도록 required=False)
+    GOOGLE_API_KEY: str = _get_env("GOOGLE_API_KEY", required=False)
+
+    # 이미지 호출 키를 별도로 지정하고 싶으면 사용 (기본: OPENAI_API_KEY)
+    IMAGE_API_KEY: str = _get_env("IMAGE_API_KEY", required=False) or OPENAI_API_KEY
 
     # -------------------------
     # WordPress
@@ -30,15 +32,8 @@ class Settings:
     # -------------------------
     # Models
     # -------------------------
-    # 글 모델 (가성비 기본값)
-    OPENAI_MODEL: str = _get_env("OPENAI_MODEL", required=False, default="gpt-5-mini") or "gpt-5-mini"
-
-    # ✅ 이미지 모델: 프로젝트 내부(ai_gemini_image 래퍼)가 OpenAI 이미지 호출을 하도록 되어 있다는 전제
-    # 예) "gpt-image-1" / "gpt-image-1.5" 등
-    IMAGE_MODEL: str = _get_env("IMAGE_MODEL", required=False, default="gpt-image-1") or "gpt-image-1"
-
-    # (호환) 기존 코드가 GEMINI_IMAGE_MODEL을 참조할 수도 있으니 alias로 유지
-    GEMINI_IMAGE_MODEL: str = IMAGE_MODEL
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+    GEMINI_IMAGE_MODEL: str = os.getenv("GEMINI_IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1"
 
     # -------------------------
     # Naver Search API
@@ -47,8 +42,21 @@ class Settings:
     NAVER_CLIENT_SECRET: str = _get_env("NAVER_CLIENT_SECRET", required=True)
 
     # -------------------------
-    # Guardrail (선택)
+    # Guardrails / Ops
     # -------------------------
-    MAX_POSTS_PER_DAY: int = int(_get_env("MAX_POSTS_PER_DAY", required=False, default="3") or "3")
-    MAX_USD_PER_MONTH: float = float(_get_env("MAX_USD_PER_MONTH", required=False, default="30") or "30")
-    ALLOW_OVER_BUDGET: int = int(_get_env("ALLOW_OVER_BUDGET", required=False, default="1") or "1")
+    MAX_POSTS_PER_DAY: int = int(os.getenv("MAX_POSTS_PER_DAY", "3") or "3")
+    MAX_USD_PER_MONTH: float = float(os.getenv("MAX_USD_PER_MONTH", "30.0") or "30.0")
+
+    # 자동발행 우선(초과여도 진행): 1=허용, 0=차단
+    ALLOW_OVER_BUDGET: int = int(os.getenv("ALLOW_OVER_BUDGET", "1") or "1")
+
+    # -------------------------
+    # AdSense (optional)
+    # -------------------------
+    ADSENSE_CLIENT: str = os.getenv("ADSENSE_CLIENT", "").strip()  # e.g. ca-pub-xxxxxxxxxxxx
+    ADSENSE_SLOT_TOP: str = os.getenv("ADSENSE_SLOT_TOP", "").strip() or os.getenv("ADSENSE_SLOT_1", "").strip()
+    ADSENSE_SLOT_MID: str = os.getenv("ADSENSE_SLOT_MID", "").strip() or os.getenv("ADSENSE_SLOT_2", "").strip()
+    ADSENSE_SLOT_BOTTOM: str = os.getenv("ADSENSE_SLOT_BOTTOM", "").strip() or os.getenv("ADSENSE_SLOT_3", "").strip()
+
+    # 본문에 adsbygoogle.js 스크립트를 같이 넣을지 (테마/플러그인에서 이미 넣었으면 0 권장)
+    ADSENSE_INCLUDE_SCRIPT: int = int(os.getenv("ADSENSE_INCLUDE_SCRIPT", "0") or "0")
