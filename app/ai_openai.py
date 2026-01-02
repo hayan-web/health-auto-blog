@@ -158,8 +158,9 @@ def _build_generation_prompt(keyword: str) -> str:
 2) 모든 sections[i].body는 반드시 180자 이상. (짧으면 실패로 간주)
 3) img_prompt에는 반드시 아래 문구를 그대로 포함:
    - "single scene, no collage, no text, square 1:1"
-4) 의학적 확정 진단/치료 지시처럼 쓰지 말고, 일반 정보 + '증상이 지속되면 전문가 상담' 톤 유지.
-5) JSON만 출력.
+4) 제목(title)에 '30대/40대/50대/60대', '30~50대', '3040', '4050' 등 연령대 표기는 절대 넣지 말 것.
+5) 의학적 확정 진단/치료 지시처럼 쓰지 말고, 일반 정보 + '증상이 지속되면 전문가 상담' 톤 유지.
+6) JSON만 출력.
 """.strip()
 
 
@@ -182,6 +183,7 @@ def _build_repair_prompt(original_json: Dict[str, Any]) -> str:
 - checklist_bullets 최소 3개
 - outro 60~200자
 - img_prompt에는 반드시 "single scene, no collage, no text, square 1:1" 포함
+- title에 연령대 표기(예: 30대/40대/50대/30~50대/3040/4050 등) 금지
 - JSON 외 텍스트 출력 금지
 
 [입력 JSON]
