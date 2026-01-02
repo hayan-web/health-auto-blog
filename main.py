@@ -17,6 +17,10 @@ from app.ai_gemini_image import (
     make_gemini_client,
     generate_nanobanana_image_png_bytes,
 )
+from app.topic_style_stats import (
+    record_impression as record_topic_style_impression,
+    update_score as update_topic_style_score,
+)
 from app.thumb_overlay import to_square_1024, add_title_to_image
 from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
@@ -152,7 +156,7 @@ def run() -> None:
     base_prompt = post.get("img_prompt") or f"{keyword} blog illustration"
 
     # 🎨 이미지 스타일 선택 (A/B)
-    image_style = pick_image_style(state)
+    image_style = pick_image_style(state, topic=topic)
     print("🎨 image_style:", image_style)
 
     seed = _stable_seed_int(keyword, post["title"], str(int(time.time())))
@@ -211,6 +215,8 @@ def run() -> None:
     # 📊 이미지 노출 기록
     state = record_image_impression(state, image_style)
     state = update_image_score(state, image_style)
+    state = record_topic_style_impression(state, topic, image_style)
+    state = update_topic_style_score(state, topic, image_style)
 
     increment_post_count(state)
 
