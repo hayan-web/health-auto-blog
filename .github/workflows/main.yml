@@ -2,8 +2,8 @@ name: Auto WordPress Post
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 아침 9시(한국 시간)에 실행
-  workflow_dispatch: # 내가 원할 때 수동으로 실행하는 버튼 생성
+    - cron: '0 0 * * *' # 매일 아침 9시(한국 시간)
+  workflow_dispatch:
 
 jobs:
   build:
@@ -46,7 +46,6 @@ jobs:
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: python main.py
 
-      # ✅ preview 업로드는 딱 1번만 (중복 제거)
       - name: Upload preview html
         if: always()
         uses: actions/upload-artifact@v4
@@ -54,7 +53,7 @@ jobs:
           name: preview-html
           path: preview/
           if-no-files-found: warn
-          compression-level: 6
+          overwrite: true
 
       - name: Save state cache
         if: always()
