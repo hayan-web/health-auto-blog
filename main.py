@@ -51,12 +51,13 @@ from app.thumb_title_stats import (
     update_topic_score as update_topic_thumb_score,
 )
 
-# ✅ NEW: 생활 하위주제 선택/학습
+# ✅ 생활 하위주제 선택/학습
 from app.life_subtopic_picker import pick_life_subtopic
 from app.life_subtopic_stats import (
     record_life_subtopic_impression,
     try_update_from_post_metrics,
 )
+
 
 S = Settings()
 
@@ -64,6 +65,8 @@ S = Settings()
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
     prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
+    if not prefix:
+        prefix = "img"
     return f"{prefix}-{uid}.{ext}"
 
 
@@ -119,6 +122,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int) -> str:
 
     base_raw = (base or "").strip()
     low = base_raw.lower()
+
     if "single scene" not in low:
         base_raw += ", single scene"
     if "no collage" not in low:
@@ -136,33 +140,54 @@ def _build_image_prompt(base: str, *, variant: str, seed: int) -> str:
     return f"{base_raw}, {preset}, {extra}"
 
 
+def _strip_age_terms(text: str) -> str:
+    """
+    제목/썸네일 문구에서 연령대·중년 표현 제거
+    """
+    if not text:
+        return text
+    patterns = [
+        r"\b\d{2}\s*대\b",         # 30대
+        r"\b\d{2}\s*~\s*\d{2}\s*대\b",  # 30~40대
+        r"\b\d{2}\s*-\s*\d{2}\s*대\b",  # 30-40대
+        r"\b중년\b",
+        r"\b장년\b",
+        r"\b노년\b",
+        r"\b시니어\b",
+    ]
+    out = text
+    for p in patterns:
+        out = re.sub(p, "", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    # 앞/뒤 기호 정리
+    out = re.sub(r"^[\-\|\:\·\.\,]+\s*", "", out).strip()
+    out = re.sub(r"\s*[\-\|\:\·\.\,]+$", "", out).strip()
+    return out
+
+
 def run() -> None:
     S = Settings()
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
 
-    # ⚠️ 프로젝트 구조 유지: ai_gemini_image 내부가 OpenAI 이미지 래퍼면 OPENAI 키가 맞습니다.
-    # 진짜 Gemini면 GOOGLE_API_KEY를 넣어야 합니다(여기서만 바꾸면 됨).
+    # 이미지 키: IMAGE_API_KEY 우선(있으면), 없으면 OPENAI_API_KEY 사용
     img_key = getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
 
     state = load_state()
 
-    # ✅ 클릭 로그 반영(기존)
+    # 클릭 로그 + (있으면) post_metrics 기반 보수 업데이트
     state = ingest_click_log(state, S.WP_URL)
-
-    # ✅ (있으면) post_metrics 기반으로 생활 하위주제 클릭 아주 보수 업데이트
     state = try_update_from_post_metrics(state)
 
     history = state.get("history", [])
 
-    # 0) 가드레일: "자동 발행 우선"이면 초과 시에도 런이 죽지 않게 옵션 처리
+    # 0) 가드레일(초과 허용 옵션)
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-
-    allow_over_budget = bool(int(getattr(S, "ALLOW_OVER_BUDGET", 1)))  # 기본 1(허용)
+    allow_over_budget = bool(int(getattr(S, "ALLOW_OVER_BUDGET", 1)))  # 기본 허용
     if allow_over_budget:
         try:
             check_limits_or_raise(state, cfg)
@@ -178,12 +203,12 @@ def run() -> None:
         history,
     )
 
-    # 2) 주제 분기
+    # 2) 주제 분기 + 프롬프트
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
-    # ✅ NEW: 생활 주제면 하위주제 선택(성과 기반)
+    # ✅ 생활이면 하위주제 추가 힌트
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
@@ -194,7 +219,6 @@ def run() -> None:
 
     # 3) 글 생성 + 품질
     def _gen():
-        # ✅ prompt 인자 지원/미지원 둘 다 안전
         try:
             post = generate_blog_post(
                 openai_client,
@@ -214,8 +238,12 @@ def run() -> None:
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
-    # 4) 썸네일 타이틀
+    # ✅ 제목 연령 문구 제거(원천 차단)
+    post["title"] = _strip_age_terms(post.get("title", ""))
+
+    # 4) 썸네일 타이틀 + 연령 제거
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
+    thumb_title = _strip_age_terms(thumb_title)
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
 
     # 5) 이미지 생성
@@ -266,11 +294,13 @@ def run() -> None:
         outro=post.get("outro"),
     )
 
-    # ✅ 쿠팡은 "생활(topic=life)"에서만
+    # ✅ 쿠팡은 life에서만
     coupang_inserted = False
     if topic == "life":
         try:
-            allow, _reason = should_inject_coupang(state, topic=topic, keyword=keyword, post=post, subtopic=life_subtopic)
+            allow, _reason = should_inject_coupang(
+                state, topic=topic, keyword=keyword, post=post, subtopic=life_subtopic
+            )
         except TypeError:
             allow, _reason = should_inject_coupang(state, topic=topic, keyword=keyword, post=post)
 
@@ -309,6 +339,7 @@ def run() -> None:
     if topic == "life" and life_subtopic:
         state = record_life_subtopic_impression(state, life_subtopic, n=1)
 
+    # 가드레일 카운트(구현이 in-place일 수도/리턴일 수도 있어 그대로 호출)
     increment_post_count(state)
 
     rule = CooldownRule(
