@@ -69,9 +69,9 @@ jobs:
           #    ADSENSE_CLIENT = ca-pub-xxxxxxxxxxxxxxxx
           #    ADSENSE_SLOT1/2/3 = 글 본문에 삽입할 슬롯 ID
           ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
-          ADSENSE_SLOT1: ${{ secrets.ADSENSE_SLOT1 }}
-          ADSENSE_SLOT2: ${{ secrets.ADSENSE_SLOT2 }}
-          ADSENSE_SLOT3: ${{ secrets.ADSENSE_SLOT3 }}
+          ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
+          ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
+          ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
 
           # 선택: 이미지 키를 분리하고 싶을 때만
           # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
