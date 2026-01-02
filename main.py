@@ -27,6 +27,7 @@ from app.store import load_state, save_state, add_history_item
 from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
 from app.click_ingest import ingest_click_log
+from app.prioritizer import pick_best_publishing_combo
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
@@ -172,6 +173,10 @@ def run() -> None:
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
+    # ✅ (11) CTR+RPM 기반으로 "이번 회차" 이미지/썸네일 우선순위 결정
+    best_image_style, thumb_variant, pr_dbg = pick_best_publishing_combo(state, topic=topic)
+    print("🏁 publish priority:", pr_dbg)
+    print("🏁 best_image_style:", best_image_style, "| thumb_variant:", thumb_variant)
 
     # -------------------------
     # 3) 글 생성 + 품질 재생성
@@ -193,19 +198,18 @@ def run() -> None:
     # -------------------------
     # 4) ✅ 썸네일 타이틀 A/B 생성 (학습 포함)
     # -------------------------
-    try:
-        thumb_title, thumb_variant = generate_thumbnail_title_ab(
-            openai_client,
-            S.OPENAI_MODEL,
-            title=post["title"],
-            keyword=keyword,
-            topic=topic,
-            state=state,
-        )
-    except Exception as e:
-        print(f"⚠️ 썸네일 A/B 실패 → 기존 방식 fallback: {e}")
-        thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
-        thumb_variant = "fallback_single"
+    thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
+
+    # ✅ (11) thumb_variant 힌트로 아주 약하게 문구 방향만 통일
+    # (너무 강하게 바꾸면 글/썸네일 깨져보일 수 있어서 안전 강도)
+    if thumb_variant == "benefit_short":
+        thumb_title = (thumb_title + " 핵심").strip()[:18]
+    elif thumb_variant == "howto_short":
+        thumb_title = (thumb_title + " 방법").strip()[:18]
+    elif thumb_variant == "mythbust_short":
+        thumb_title = (thumb_title + " 오해").strip()[:18]
+    elif thumb_variant == "checklist_short":
+        thumb_title = (thumb_title + " 체크").strip()[:18]
 
     print("🧩 썸네일 타이틀:", thumb_title, "| variant:", thumb_variant)
 
@@ -215,7 +219,12 @@ def run() -> None:
     base_prompt = post.get("img_prompt") or f"{keyword} blog illustration, single scene, no collage, no text, square 1:1"
 
     # 🎨 이미지 스타일 선택 (기존 학습 유지)
-    image_style = pick_image_style(state, topic=topic)
+    # 기존 picker도 유지하되, (11) 우선순위 선택을 최우선으로 사용
+    try:
+        image_style = best_image_style
+    except Exception:
+        image_style = pick_image_style(state, topic=topic)
+
     print("🎨 image_style:", image_style)
 
     seed = _stable_seed_int(keyword, post.get("title", ""), str(int(time.time())))
