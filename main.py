@@ -59,26 +59,6 @@ from app.life_subtopic_stats import (
     try_update_from_post_metrics,
 )
 
-
-
-def _sanitize_title(title: str) -> str:
-    """제목에서 연령대/나이 표기를 제거합니다."""
-    if not title:
-        return title
-    t = title
-    # 예: 30대, 40대, 50대, 2030, 3040
-    t = re.sub(r"\b(20|30|40|50|60|70)\s*대\b", "", t)
-    t = re.sub(r"\b(2030|3040|4050|5060)\b", "", t)
-    # 예: 30~40대, 40~50, 20~30
-    t = re.sub(r"\b\d{1,2}\s*~\s*\d{1,2}\s*대?\b", "", t)
-    # 중복 공백 정리
-    t = re.sub(r"\s{2,}", " ", t).strip()
-    # 구두점 앞 공백 정리
-    t = re.sub(r"\s+([!?,.])", r"\1", t)
-    return t
-
-
-
 S = Settings()
 
 
@@ -96,24 +76,9 @@ def _fallback_png_bytes(text: str) -> bytes:
 
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
-        # GitHub Actions(ubuntu)에는 noto cjk 폰트가 설치되므로, 한글 깨짐(□□□)을 최대한 방지합니다.
-        font = None
-        for p in (
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
-            "DejaVuSans.ttf",
-        ):
-            try:
-                if p == "DejaVuSans.ttf":
-                    font = ImageFont.truetype(p, 48)
-                elif os.path.exists(p):
-                    font = ImageFont.truetype(p, 48)
-                if font:
-                    break
-            except Exception:
-                continue
-        if font is None:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 48)
+        except Exception:
             font = ImageFont.load_default()
 
         msg = (text or "image").strip()[:40]
@@ -139,25 +104,52 @@ def _stable_seed_int(*parts: str) -> int:
     return int(h[:8], 16)
 
 
-def _build_image_prompt(base: str, *, variant: str, seed: int) -> str:
-    HERO_PRESETS = [
-        "clean flat illustration, minimal background, centered subject, soft daylight",
-        "3D clay style, simple props, soft studio lighting",
-        "watercolor illustration, gentle texture paper, warm light",
-        "isometric illustration, neat geometry, pastel colors",
+def _sanitize_title_remove_age(title: str) -> str:
+    """
+    예: '30~50대를 위한 ...' / '20-30대' / '40대' 같은 표현 제거 (기본 ON)
+    """
+    if not title:
+        return title
+
+    t = title
+
+    # 30~50대 / 30-50대 / 30~ 50대 등
+    t = re.sub(r"\b\d{2}\s*[~-]\s*\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
+
+    # 20대/30대/40대/50대 단독
+    t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
+
+    # '중년', '장년' 같은 단어는 원하시면 여기도 제거 가능하지만 일단 유지
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    t = re.sub(r"^[\-\:\|\·\s]+", "", t).strip()
+    return t
+
+
+def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) -> str:
+    """
+    style_mode:
+      - "watercolor" : 수채화
+      - "photo"      : 실사/사진
+      - 그 외        : 학습 스타일 문자열(약하게 힌트)
+    """
+    HERO_COMPO = [
+        "centered subject, simple background, soft daylight, 35mm feel",
+        "clean composition, lots of negative space, gentle light",
+        "iconic main object, calm mood, minimal props",
     ]
-    BODY_PRESETS = [
-        "photo-realistic style, wide shot, natural light",
-        "hand-drawn sketch style, dynamic perspective",
-        "bold vector art, off-center composition",
-        "soft 3D render, close-up detail shot",
+    BODY_COMPO = [
+        "different angle, wider shot, secondary elements, 24mm feel",
+        "off-center composition, detail emphasis, different perspective",
+        "close-up detail shot, different framing, rim light",
     ]
+
     rng = random.Random(seed + (1 if variant == "hero" else 2))
-    preset = rng.choice(HERO_PRESETS if variant == "hero" else BODY_PRESETS)
+    comp = rng.choice(HERO_COMPO if variant == "hero" else BODY_COMPO)
 
     base_raw = (base or "").strip()
     low = base_raw.lower()
 
+    # 필수 규칙(콜라주/텍스트/비율 방지)
     if "single scene" not in low:
         base_raw += ", single scene"
     if "no collage" not in low:
@@ -167,37 +159,17 @@ def _build_image_prompt(base: str, *, variant: str, seed: int) -> str:
     if ("square" not in low) and ("1:1" not in low):
         base_raw += ", square 1:1"
 
-    extra = (
-        "title-safe area, iconic main object"
-        if variant == "hero"
-        else "different composition, secondary elements, different angle"
-    )
-    return f"{base_raw}, {preset}, {extra}"
+    # 스타일 강제
+    if style_mode == "watercolor":
+        style = "watercolor illustration, soft wash, paper texture, gentle edges, airy light"
+    elif style_mode == "photo":
+        style = "photorealistic photo, natural lighting, realistic textures, high detail, DSLR look"
+    else:
+        style = f"style hint: {style_mode}"
 
+    extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
 
-def _strip_age_terms(text: str) -> str:
-    """
-    제목/썸네일 문구에서 연령대·중년 표현 제거
-    """
-    if not text:
-        return text
-    patterns = [
-        r"\b\d{2}\s*대\b",         # 30대
-        r"\b\d{2}\s*~\s*\d{2}\s*대\b",  # 30~40대
-        r"\b\d{2}\s*-\s*\d{2}\s*대\b",  # 30-40대
-        r"\b중년\b",
-        r"\b장년\b",
-        r"\b노년\b",
-        r"\b시니어\b",
-    ]
-    out = text
-    for p in patterns:
-        out = re.sub(p, "", out)
-    out = re.sub(r"\s{2,}", " ", out).strip()
-    # 앞/뒤 기호 정리
-    out = re.sub(r"^[\-\|\:\·\.\,]+\s*", "", out).strip()
-    out = re.sub(r"\s*[\-\|\:\·\.\,]+$", "", out).strip()
-    return out
+    return f"{base_raw}, {style}, {comp}, {extra}"
 
 
 def run() -> None:
@@ -205,24 +177,28 @@ def run() -> None:
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
 
-    # 이미지 키: IMAGE_API_KEY 우선(있으면), 없으면 OPENAI_API_KEY 사용
-    img_key = getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
+    # 프로젝트 구조 유지:
+    # - ai_gemini_image 내부가 OpenAI 이미지 래퍼면 OPENAI 키 사용
+    # - 진짜 Gemini면 GOOGLE_API_KEY를 쓰도록 IMAGE_API_KEY로 오버라이드 가능
+    img_key = os.getenv("IMAGE_API_KEY", "").strip() or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
 
     state = load_state()
 
-    # 클릭 로그 + (있으면) post_metrics 기반 보수 업데이트
+    # ✅ 클릭 로그 반영
     state = ingest_click_log(state, S.WP_URL)
+    # ✅ post_metrics 기반 업데이트(있으면)
     state = try_update_from_post_metrics(state)
 
     history = state.get("history", [])
 
-    # 0) 가드레일(초과 허용 옵션)
+    # 0) 가드레일 (자동발행 우선이면 초과 시에도 죽지 않게)
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-    allow_over_budget = bool(int(getattr(S, "ALLOW_OVER_BUDGET", 1)))  # 기본 허용
+
+    allow_over_budget = bool(int(os.getenv("ALLOW_OVER_BUDGET", str(getattr(S, "ALLOW_OVER_BUDGET", 1)))))
     if allow_over_budget:
         try:
             check_limits_or_raise(state, cfg)
@@ -238,18 +214,19 @@ def run() -> None:
         history,
     )
 
-    # 2) 주제 분기 + 프롬프트
+    # 2) 주제 분기
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
-    # ✅ 생활이면 하위주제 추가 힌트
+    # ✅ 생활 주제면 하위주제 선택(성과 기반)
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
 
+    # ✅ 이번 회차 우선순위
     best_image_style, thumb_variant, _ = pick_best_publishing_combo(state, topic=topic)
 
     # 3) 글 생성 + 품질
@@ -273,27 +250,58 @@ def run() -> None:
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
-    # 제목 정리(연령대 표기 제거)
-    try:
-        post["title"] = _sanitize_title(post.get("title", ""))
-    except Exception:
-        pass
+    # ✅ 제목에서 연령대 문구 제거(기본 ON)
+    remove_age_in_title = bool(int(os.getenv("REMOVE_AGE_IN_TITLE", "1")))
+    if remove_age_in_title:
+        post["title"] = _sanitize_title_remove_age(post.get("title", ""))
 
-    # ✅ 제목 연령 문구 제거(원천 차단)
-    post["title"] = _strip_age_terms(post.get("title", ""))
-
-    # 4) 썸네일 타이틀 + 연령 제거
+    # 4) 썸네일 타이틀
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
-    thumb_title = _strip_age_terms(thumb_title)
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
+
+    # ------------------------------------------------------------
+    # ✅ 쿠팡 '삽입 예정' 여부를 이미지 생성 전에 먼저 판단
+    # ------------------------------------------------------------
+    coupang_planned = False
+    coupang_reason = ""
+    if topic == "life":
+        try:
+            r = should_inject_coupang(state, topic=topic, keyword=keyword, post=post, subtopic=life_subtopic)
+        except TypeError:
+            r = should_inject_coupang(state, topic=topic, keyword=keyword, post=post)
+
+        if isinstance(r, tuple):
+            coupang_planned = bool(r[0])
+            coupang_reason = str(r[1]) if len(r) > 1 else ""
+        else:
+            coupang_planned = bool(r)
+
+    # ------------------------------------------------------------
+    # ✅ 주제별 이미지 스타일 강제 룰
+    #   - health/trend => watercolor
+    #   - life + coupang_planned => photo
+    #   - else => learned style
+    # ------------------------------------------------------------
+    forced_style_mode = ""
+    if topic in ("health", "trend"):
+        forced_style_mode = "watercolor"
+    elif topic == "life" and coupang_planned:
+        forced_style_mode = "photo"
+
+    learned_style = best_image_style or pick_image_style(state, topic=topic)
+    style_mode = forced_style_mode or learned_style
+    image_style_for_stats = forced_style_mode or learned_style  # 통계 기록용
+
+    print("🎨 style_mode:", style_mode, "| forced:", bool(forced_style_mode), "| learned:", learned_style)
+    if topic == "life":
+        print("🛒 coupang_planned:", coupang_planned, "| reason:", coupang_reason)
 
     # 5) 이미지 생성
     base_prompt = post.get("img_prompt") or f"{keyword} blog illustration, single scene, no collage, no text, square 1:1"
-    image_style = best_image_style or pick_image_style(state, topic=topic)
 
     seed = _stable_seed_int(keyword, post.get("title", ""), str(int(time.time())))
-    hero_prompt = _build_image_prompt(base_prompt, variant="hero", seed=seed) + f", style: {image_style}"
-    body_prompt = _build_image_prompt(base_prompt, variant="body", seed=seed) + f", style: {image_style}"
+    hero_prompt = _build_image_prompt(base_prompt, variant="hero", seed=seed, style_mode=style_mode)
+    body_prompt = _build_image_prompt(base_prompt, variant="body", seed=seed, style_mode=style_mode)
 
     try:
         hero_img = generate_nanobanana_image_png_bytes(img_client, S.GEMINI_IMAGE_MODEL, hero_prompt)
@@ -335,25 +343,18 @@ def run() -> None:
         outro=post.get("outro"),
     )
 
-    # ✅ 쿠팡은 life에서만
+    # ✅ 쿠팡은 life + coupang_planned일 때만
     coupang_inserted = False
-    if topic == "life":
-        try:
-            allow, _reason = should_inject_coupang(
-                state, topic=topic, keyword=keyword, post=post, subtopic=life_subtopic
-            )
-        except TypeError:
-            allow, _reason = should_inject_coupang(state, topic=topic, keyword=keyword, post=post)
-
-        if allow:
-            html = inject_coupang(html, keyword=keyword)
-            html = html.replace(
-                '<div class="wrap">',
-                '<div class="wrap">\n<div class="disclosure">이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.</div>',
-                1,
-            )
-            state = increment_coupang_count(state)
-            coupang_inserted = True
+    if topic == "life" and coupang_planned:
+        html = inject_coupang(html, keyword=keyword)
+        # 최상단 대가성 문구(쿠팡이 실제로 들어간 글에만)
+        html = html.replace(
+            '<div class="wrap">',
+            '<div class="wrap">\n<div class="disclosure">이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.</div>',
+            1,
+        )
+        state = increment_coupang_count(state)
+        coupang_inserted = True
 
     # ✅ 애드센스는 전 글 공통
     html = inject_adsense_slots(html)
@@ -367,10 +368,10 @@ def run() -> None:
     )
 
     # 9) 통계/학습
-    state = record_image_impression(state, image_style)
-    state = update_image_score(state, image_style)
-    state = record_topic_style_impression(state, topic, image_style)
-    state = update_topic_style_score(state, topic, image_style)
+    state = record_image_impression(state, image_style_for_stats)
+    state = update_image_score(state, image_style_for_stats)
+    state = record_topic_style_impression(state, topic, image_style_for_stats)
+    state = update_topic_style_score(state, topic, image_style_for_stats)
 
     state = record_thumb_impression(state, thumb_variant)
     state = update_thumb_score(state, thumb_variant)
@@ -380,7 +381,6 @@ def run() -> None:
     if topic == "life" and life_subtopic:
         state = record_life_subtopic_impression(state, life_subtopic, n=1)
 
-    # 가드레일 카운트(구현이 in-place일 수도/리턴일 수도 있어 그대로 호출)
     increment_post_count(state)
 
     rule = CooldownRule(
@@ -388,7 +388,7 @@ def run() -> None:
         ctr_floor=float(getattr(S, "COOLDOWN_CTR_FLOOR", 0.0025)),
         cooldown_days=int(getattr(S, "COOLDOWN_DAYS", 3)),
     )
-    state = apply_cooldown_rules(state, topic=topic, img=image_style, tv=thumb_variant, rule=rule)
+    state = apply_cooldown_rules(state, topic=topic, img=image_style_for_stats, tv=thumb_variant, rule=rule)
 
     state = add_history_item(
         state,
@@ -398,15 +398,16 @@ def run() -> None:
             "title": post["title"],
             "title_fp": _title_fingerprint(post["title"]),
             "thumb_variant": thumb_variant,
-            "image_style": image_style,
+            "image_style": image_style_for_stats,
             "topic": topic,
             "life_subtopic": life_subtopic,
+            "coupang_planned": coupang_planned,
             "coupang_inserted": coupang_inserted,
         },
     )
     save_state(state)
 
-    print(f"✅ 발행 완료: post_id={post_id} | topic={topic} | sub={life_subtopic} | coupang={coupang_inserted}")
+    print(f"✅ 발행 완료: post_id={post_id} | topic={topic} | sub={life_subtopic} | coupang={coupang_inserted} | img_style={image_style_for_stats}")
 
 
 if __name__ == "__main__":
