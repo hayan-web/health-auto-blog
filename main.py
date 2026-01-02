@@ -29,6 +29,7 @@ from app.keyword_picker import pick_keyword_by_naver
 from app.click_ingest import ingest_click_log
 from app.prioritizer import pick_best_publishing_combo
 from app.cooldown import CooldownRule, apply_cooldown_rules
+from app.coupang_policy import should_inject_coupang, increment_coupang_count
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
