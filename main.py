@@ -11,7 +11,7 @@ from app.config import Settings
 from app.ai_openai import (
     make_openai_client,
     generate_blog_post,
-    generate_thumbnail_title,
+    generate_thumbnail_title,  # (기존 함수 유지: AB 실패 시 fallback)
 )
 from app.ai_gemini_image import (
     make_gemini_client,
@@ -29,7 +29,7 @@ from app.keyword_picker import pick_keyword_by_naver
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
-from app.monetize_coupang import inject_coupang
+from app.monetize_coupang import inject_coupang  # (현재 main에서는 호출 안함: 필요 시 켜도 기존 틀 안깨짐)
 
 from app.image_stats import (
     record_impression as record_image_impression,
@@ -41,6 +41,14 @@ from app.quality_gate import quality_retry_loop
 from app.prompt_router import guess_topic_from_keyword, build_system_prompt, build_user_prompt
 from app.guardrails import GuardConfig, check_limits_or_raise, increment_post_count
 
+# ✅ NEW: 썸네일 타이틀 A/B + 학습
+from app.thumb_title_ab import generate_thumbnail_title_ab
+from app.thumb_title_stats import (
+    record_impression as record_thumb_impression,
+    update_score as update_thumb_score,
+    record_topic_impression as record_topic_thumb_impression,
+    update_topic_score as update_topic_thumb_score,
+)
 
 S = Settings()
 
@@ -104,74 +112,124 @@ def _build_image_prompt(base: str, *, variant: str, seed: int) -> str:
     rng = random.Random(seed + (1 if variant == "hero" else 2))
     preset = rng.choice(HERO_PRESETS if variant == "hero" else BODY_PRESETS)
 
-    base = (base or "").strip().lower()
-    if "single scene" not in base:
-        base += ", single scene"
-    if "no collage" not in base:
-        base += ", no collage"
-    if "no text" not in base:
-        base += ", no text"
-    if "square" not in base and "1:1" not in base:
-        base += ", square 1:1"
+    base_raw = (base or "").strip()
+    low = base_raw.lower()
+
+    # 필수 규칙 보강(콜라주/텍스트 방지 + 1:1)
+    if "single scene" not in low:
+        base_raw += ", single scene"
+    if "no collage" not in low:
+        base_raw += ", no collage"
+    if "no text" not in low:
+        base_raw += ", no text"
+    if ("square" not in low) and ("1:1" not in low):
+        base_raw += ", square 1:1"
 
     extra = (
         "title-safe area, iconic main object"
         if variant == "hero"
-        else "different composition, secondary elements"
+        else "different composition, secondary elements, different angle"
     )
 
-    return f"{base}, {preset}, {extra}"
+    return f"{base_raw}, {preset}, {extra}"
 
 
 def run() -> None:
+    # (안전) Settings 재로드
+    S = Settings()
+
     openai_client = make_openai_client(S.OPENAI_API_KEY)
+    # ⚠️ img_client는 내부 구현에 따라 OpenAI 이미지 호출 래퍼일 수도 있음(사용자님 구조 유지)
     img_client = make_gemini_client(S.OPENAI_API_KEY)
 
     state = load_state()
     history = state.get("history", [])
 
+    # -------------------------
+    # 0) 가드레일 (발행/비용 제한)
+    # -------------------------
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
     check_limits_or_raise(state, cfg)
 
+    # -------------------------
+    # 1) 키워드 선정
+    # -------------------------
     keyword, _ = pick_keyword_by_naver(
         S.NAVER_CLIENT_ID,
         S.NAVER_CLIENT_SECRET,
         history,
     )
 
+    # -------------------------
+    # 2) 주제 분기(프롬프트 라우팅)
+    # -------------------------
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
+    # -------------------------
+    # 3) 글 생성 + 품질 재생성
+    #    (generate_blog_post가 system/user prompt를 아직 안 받는 구조라면 그대로 유지)
+    # -------------------------
     def _gen():
-        return generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+        # 중복 방지(가능하면 유지)
+        post = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+
+        dup, reason = pick_retry_reason(post.get("title", ""), history)
+        if dup:
+            # 중복이면 품질 점수 떨어뜨려 재생성 유도
+            post["sections"] = []
+            print(f"♻️ 중복 감지({reason}) → 재생성 유도")
+        return post
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
-    thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
+    # -------------------------
+    # 4) ✅ 썸네일 타이틀 A/B 생성 (학습 포함)
+    # -------------------------
+    try:
+        thumb_title, thumb_variant = generate_thumbnail_title_ab(
+            openai_client,
+            S.OPENAI_MODEL,
+            title=post["title"],
+            keyword=keyword,
+            topic=topic,
+            state=state,
+        )
+    except Exception as e:
+        print(f"⚠️ 썸네일 A/B 실패 → 기존 방식 fallback: {e}")
+        thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
+        thumb_variant = "fallback_single"
 
-    base_prompt = post.get("img_prompt") or f"{keyword} blog illustration"
+    print("🧩 썸네일 타이틀:", thumb_title, "| variant:", thumb_variant)
 
-    # 🎨 이미지 스타일 선택 (A/B)
+    # -------------------------
+    # 5) 이미지 2장 생성 (프롬프트 다양화 + 스타일 A/B)
+    # -------------------------
+    base_prompt = post.get("img_prompt") or f"{keyword} blog illustration, single scene, no collage, no text, square 1:1"
+
+    # 🎨 이미지 스타일 선택 (기존 학습 유지)
     image_style = pick_image_style(state, topic=topic)
     print("🎨 image_style:", image_style)
 
-    seed = _stable_seed_int(keyword, post["title"], str(int(time.time())))
+    seed = _stable_seed_int(keyword, post.get("title", ""), str(int(time.time())))
 
     hero_prompt = _build_image_prompt(base_prompt, variant="hero", seed=seed) + f", style: {image_style}"
     body_prompt = _build_image_prompt(base_prompt, variant="body", seed=seed) + f", style: {image_style}"
 
     try:
         hero_img = generate_nanobanana_image_png_bytes(img_client, S.GEMINI_IMAGE_MODEL, hero_prompt)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 대표 이미지 생성 실패 → fallback: {e}")
         hero_img = _fallback_png_bytes(keyword)
 
     try:
         body_img = generate_nanobanana_image_png_bytes(img_client, S.GEMINI_IMAGE_MODEL, body_prompt)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 중간 이미지 생성 실패 → 대표 이미지 재사용: {e}")
         body_img = hero_img
 
     hero_img = to_square_1024(hero_img)
@@ -179,13 +237,27 @@ def run() -> None:
 
     hero_img_titled = to_square_1024(add_title_to_image(hero_img, thumb_title))
 
+    # -------------------------
+    # 6) WP 업로드
+    # -------------------------
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, make_ascii_filename("featured")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        hero_img_titled,
+        make_ascii_filename("featured"),
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, make_ascii_filename("body")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        body_img,
+        make_ascii_filename("body"),
     )
 
+    # -------------------------
+    # 7) HTML 포맷 + (선택) 쿠팡 + 애드센스
+    # -------------------------
     html = format_post_v2(
         title=post["title"],
         keyword=keyword,
@@ -199,9 +271,15 @@ def run() -> None:
         outro=post.get("outro"),
     )
 
+    # (선택) 쿠팡 삽입 로직이 준비되어 있다면 켜도 됨 (틀 안깨짐)
+    # html = inject_coupang(html, keyword=keyword)
+
     html = inject_adsense_slots(html)
     post["content_html"] = html
 
+    # -------------------------
+    # 8) 발행
+    # -------------------------
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -212,14 +290,25 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
-    # 📊 이미지 노출 기록
+    # -------------------------
+    # 9) ✅ 통계 기록 (기존 + 신규)
+    # -------------------------
+    # 📊 이미지 스타일 노출 기록(기존)
     state = record_image_impression(state, image_style)
     state = update_image_score(state, image_style)
     state = record_topic_style_impression(state, topic, image_style)
     state = update_topic_style_score(state, topic, image_style)
 
+    # 📊 썸네일 타이틀(A/B) 노출 기록(신규)
+    state = record_thumb_impression(state, thumb_variant)
+    state = update_thumb_score(state, thumb_variant)
+    state = record_topic_thumb_impression(state, topic, thumb_variant)
+    state = update_topic_thumb_score(state, topic, thumb_variant)
+
+    # 가드레일 카운트 증가(기존)
     increment_post_count(state)
 
+    # 히스토리 저장(기존)
     state = add_history_item(
         state,
         {
@@ -227,6 +316,10 @@ def run() -> None:
             "keyword": keyword,
             "title": post["title"],
             "title_fp": _title_fingerprint(post["title"]),
+            # 추적용(선택): 나중에 분석하기 편하게 추가 필드
+            "thumb_variant": thumb_variant,
+            "image_style": image_style,
+            "topic": topic,
         },
     )
     save_state(state)
