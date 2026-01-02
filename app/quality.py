@@ -1,102 +1,74 @@
-# app/quality_gate.py
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Dict, Tuple, List
 
 
-@dataclass
-class QualityResult:
-    ok: bool
-    score: int
-    reasons: List[str]
+def _word_count(s: str) -> int:
+    if not s:
+        return 0
+    return len(re.findall(r"\S+", s))
 
 
-def _safe_str(x: Any) -> str:
-    return str(x) if x is not None else ""
-
-
-def _len_ok(text: str, min_len: int) -> bool:
-    return len((text or "").strip()) >= min_len
-
-
-def score_post(candidate: Dict[str, Any]) -> QualityResult:
+def score_post(post: Dict) -> Tuple[int, List[str]]:
     """
-    후보 글 품질 점수화.
-    - sections[*].body 길이, 구조 존재 여부, img_prompt 안전성 등 체크
-    - 통과 기준(ok)은 score >= 70 권장 (main에서 조정)
+    0~100 점수(휴리스틱)
+    - 너무 짧거나
+    - 섹션 구조 없거나
+    - 반복/스팸 느낌 강하면 감점
     """
-    reasons: List[str] = []
+    reasons = []
     score = 100
 
-    title = _safe_str(candidate.get("title"))
-    if not _len_ok(title, 8):
+    title = (post.get("title") or "").strip()
+    content = (post.get("content") or post.get("body") or "").strip()
+    intro = (post.get("intro") or "").strip()
+    outro = (post.get("outro") or "").strip()
+    sections = post.get("sections") or []
+
+    # 제목
+    if len(title) < 8:
         score -= 15
-        reasons.append("title이 너무 짧음")
-
-    img_prompt = _safe_str(candidate.get("img_prompt"))
-    # 이미지 프롬프트에 1:1 힌트(느슨하게 체크)
-    if "square" not in img_prompt.lower() and "1:1" not in img_prompt:
-        score -= 8
-        reasons.append("img_prompt에 1:1(square) 힌트가 약함")
-
-    # 콜라주/텍스트 유발 단어(완전 차단은 아님. 경고성 감점)
-    bad_words = ["collage", "text", "typography", "logo", "watermark", "letters", "words"]
-    if any(w in img_prompt.lower() for w in bad_words):
-        score -= 6
-        reasons.append("img_prompt에 콜라주/텍스트 유발 단어 포함 가능")
-
-    sections = candidate.get("sections") or []
-    if not isinstance(sections, list) or len(sections) < 4:
-        score -= 18
-        reasons.append("sections 개수가 부족(최소 4 권장)")
-
-    # 각 섹션 바디 최소 길이
-    if isinstance(sections, list):
-        for i, s in enumerate(sections, start=1):
-            body = _safe_str((s or {}).get("body"))
-            if not _len_ok(body, 140):
-                score -= 7
-                reasons.append(f"섹션{i}: body가 너무 짧음(140자 미만)")
-
-    # 요약/체크리스트가 둘 다 없으면 감점(둘 중 하나만 있어도 됨)
-    summary = candidate.get("summary_bullets")
-    checklist = candidate.get("checklist_bullets")
-    if not summary and not checklist:
+        reasons.append("제목이 너무 짧음")
+    if len(title) > 60:
         score -= 10
-        reasons.append("summary_bullets/checklist_bullets 둘 다 없음")
+        reasons.append("제목이 너무 김")
 
-    # 안전 하한
-    if score < 0:
-        score = 0
+    # 본문 길이
+    wc = _word_count(content)
+    # content가 비어있고 sections 기반이면 sections로 대체 측정
+    if wc < 200 and isinstance(sections, list) and sections:
+        merged = " ".join([(s.get("body") or "") for s in sections if isinstance(s, dict)])
+        wc = _word_count(merged)
 
-    ok = score >= 70
-    return QualityResult(ok=ok, score=score, reasons=reasons)
+    if wc < 350:
+        score -= 25
+        reasons.append(f"본문이 짧음({wc} words)")
+    elif wc < 600:
+        score -= 10
+        reasons.append(f"본문이 다소 짧음({wc} words)")
+
+    # 섹션 구조
+    if not sections or not isinstance(sections, list):
+        score -= 15
+        reasons.append("섹션 구조 없음(sections 비어있음)")
+
+    # 반복 감점(단순 휴리스틱)
+    combined = " ".join([title, intro, content, outro])
+    if combined:
+        # 같은 문장/구가 과하게 반복되는지 간단 체크
+        tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", combined.lower())
+        if len(tokens) > 50:
+            top = {}
+            for t in tokens:
+                top[t] = top.get(t, 0) + 1
+            worst = max(top.values())
+            if worst >= 18:
+                score -= 15
+                reasons.append("단어 반복이 과함")
+
+    # 점수 하한/상한
+    score = max(0, min(100, score))
+    return score, reasons
 
 
-def quality_retry_loop(
-    generate_fn,
-    *,
-    max_retry: int = 3,
-) -> Tuple[Dict[str, Any], QualityResult]:
-    """
-    generate_fn() -> candidate(dict)
-    통과할 때까지 자동 재생성.
-    """
-    last_q = QualityResult(ok=False, score=0, reasons=["초기"])
-    last_candidate: Dict[str, Any] = {}
-
-    for attempt in range(1, max_retry + 1):
-        c = generate_fn()
-        q = score_post(c)
-        last_q, last_candidate = q, c
-
-        if q.ok:
-            return c, q
-
-        # 로그용
-        print(f"🧪 품질 FAIL ({q.score}/100) → 재생성 {attempt}/{max_retry}")
-        for r in q.reasons[:8]:
-            print(" -", r)
-
-    raise RuntimeError("생성 실패: 품질 조건을 만족하는 글을 만들지 못했습니다.")
+def needs_regen(score: int, threshold: int = 75) -> bool:
+    return score < threshold
