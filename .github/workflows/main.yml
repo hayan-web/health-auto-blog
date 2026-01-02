@@ -64,6 +64,15 @@ jobs:
 
           # OpenAI
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+          # ✅ AdSense: 아래 4개는 Secrets로 추가해 주세요.
+          #    ADSENSE_CLIENT = ca-pub-xxxxxxxxxxxxxxxx
+          #    ADSENSE_SLOT1/2/3 = 글 본문에 삽입할 슬롯 ID
+          ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
+          ADSENSE_SLOT1: ${{ secrets.ADSENSE_SLOT1 }}
+          ADSENSE_SLOT2: ${{ secrets.ADSENSE_SLOT2 }}
+          ADSENSE_SLOT3: ${{ secrets.ADSENSE_SLOT3 }}
+
           # 선택: 이미지 키를 분리하고 싶을 때만
           # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
