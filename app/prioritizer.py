@@ -104,6 +104,7 @@ def pick_best_publishing_combo(
 
     img_candidates = _get_image_candidates(state, topic)
     tv_candidates = _get_thumb_candidates(state, topic)
+    img_candidates, tv_candidates = _filter_blocked_candidates(state, topic, img_candidates, tv_candidates)
 
     # 랜덤 탐색(초반/정체 시 탈출용)
     if random.random() < epsilon:
@@ -174,3 +175,33 @@ def pick_best_publishing_combo(
         "tv_top5": sorted(tv_dbg, key=lambda x: x[-1], reverse=True)[:5],
     }
     return img_best, tv_best, debug
+
+def _filter_blocked_candidates(state, topic, img_candidates, tv_candidates):
+    from app.cooldown import is_blocked  # 순환 import 방지
+
+    topic = topic or "general"
+
+    img_ok = []
+    for img in img_candidates:
+        if is_blocked(state, f"img:{img}"):
+            continue
+        if is_blocked(state, f"ts:{topic}:{img}"):
+            continue
+        img_ok.append(img)
+
+    tv_ok = []
+    for tv in tv_candidates:
+        if is_blocked(state, f"tv:{tv}"):
+            continue
+        if is_blocked(state, f"tt:{topic}:{tv}"):
+            continue
+        tv_ok.append(tv)
+
+    # 전부 막히면(최악) 원래 후보를 살려서 파이프라인 안 죽게
+    if not img_ok:
+        img_ok = img_candidates
+    if not tv_ok:
+        tv_ok = tv_candidates
+
+    return img_ok, tv_ok
+
