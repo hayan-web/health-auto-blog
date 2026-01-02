@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -24,13 +24,15 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ✅ state.json 캐시: "고정 key" + "restore-keys"로 이어달리기
       - name: Restore state cache
         uses: actions/cache@v4
         with:
           path: state.json
-          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+          key: wp-state-${{ github.repository }}-v1
           restore-keys: |
             wp-state-${{ github.repository }}-
 
@@ -40,6 +42,7 @@ jobs:
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # GOOGLE_API_KEY는 이제 안 쓰면 삭제해도 됩니다(남겨도 무방)
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           WP_URL: ${{ secrets.WP_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
@@ -54,9 +57,10 @@ jobs:
           path: preview/*.html
           if-no-files-found: warn
 
+      # ✅ state.json 저장도 동일 key로(다음 실행에서 이어짐)
       - name: Save state cache
         if: always()
         uses: actions/cache@v4
         with:
           path: state.json
-          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+          key: wp-state-${{ github.repository }}-v1
