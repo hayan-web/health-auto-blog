@@ -22,6 +22,8 @@ from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
 from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
+from app.keyword_stats import record_publish, update_score
+from app.keyword_weight import weighted_choice
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
@@ -181,6 +183,21 @@ try:
         history,
         seed_keywords=seed_keywords,
     )
+
+    # ✅ 성과 가중치 반영 (후처리)
+    candidates = [keyword]
+
+    # debug에 후보 목록이 있다면 사용
+    if isinstance(debug, dict):
+        scored = debug.get("scored")
+        if isinstance(scored, list):
+            candidates = [x[0] for x in scored if isinstance(x, (list, tuple)) and x]
+
+    if len(candidates) > 1:
+        keyword = weighted_choice(candidates, state)
+
+    print("🎯 weighted keyword:", keyword)
+
     
     # 🚫 블랙리스트 키워드면 이번 회차 스킵
     if is_blacklisted(state, keyword):
