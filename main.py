@@ -159,7 +159,13 @@ def run() -> None:
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-    check_limits_or_raise(state, cfg)
+    
+    try:
+        check_limits_or_raise(state, cfg)
+    except RuntimeError as e:
+        print(f"⛔ 가드레일 차단: {e}")
+        print("➡ 이번 회차는 스킵합니다.")
+        return
 
     # 1) 키워드 선정
 # (2) topic은 이미 time_router로 계산된 상태라고 가정
@@ -341,7 +347,19 @@ except TypeError:
             state = new_state
     except TypeError:
         # increment_post_count(state) 가 in-place라면 그대로 진행
-        increment_post_count(state)
+    # 🔢 비용 추정 (텍스트 토큰은 보수적으로 1800으로 가정)
+    estimated_usd = estimate_post_usd(
+        text_tokens=1800,
+        image_count=2,
+    )
+
+    state = increment_post_count(
+        state,
+        estimated_usd=estimated_usd,
+    )
+
+    print(f"💰 비용 추정 누적: +${estimated_usd:.4f}")
+
 
     # 12) 히스토리 저장
     state = add_history_item(
