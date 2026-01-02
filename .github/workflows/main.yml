@@ -2,13 +2,20 @@ name: Auto WordPress Post
 
 on:
   schedule:
-    # 🇰🇷 KST 10:00
-    - cron: '0 1 * * *'
-    # 🇰🇷 KST 14:00
-    - cron: '0 5 * * *'
-    # 🇰🇷 KST 19:00
-    - cron: '0 10 * * *'
+    # 🇰🇷 KST 10:00 (UTC 01:00)
+    - cron: "0 1 * * *"
+    # 🇰🇷 KST 14:00 (UTC 05:00)
+    - cron: "0 5 * * *"
+    # 🇰🇷 KST 19:00 (UTC 10:00)
+    - cron: "0 10 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: wp-autopost-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -21,7 +28,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
+          cache: "pip"
 
       - name: Install fonts (Korean)
         run: |
@@ -33,25 +41,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ state.json 이어달리기 캐시
+      # ✅ state.json 이어달리기 캐시 (최신 캐시 자동 복원)
       - name: Restore state cache
         uses: actions/cache@v4
         with:
           path: state.json
-          key: wp-state-${{ github.repository }}-v1
+          key: wp-state-${{ github.repository }}-${{ github.run_id }}
           restore-keys: |
             wp-state-${{ github.repository }}-
 
       - name: Run script
         env:
+          # NAVER
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+
+          # 시드 키워드 (라우팅용)
           NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
           NAVER_SEED_KEYWORDS_TREND: "2026트렌드,정부지원금,최신정책,신제품출시,사회이슈,경제이슈,소비트렌드,뉴스핵심"
 
+          # OpenAI
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+          # WordPress
           WP_URL: ${{ secrets.WP_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
@@ -64,11 +78,3 @@ jobs:
           name: preview-html-${{ github.run_id }}
           path: preview/*.html
           if-no-files-found: warn
-
-      # ✅ 실행 결과 state 저장 (다음 실행에서 사용)
-      - name: Save state cache
-        if: always()
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: wp-state-${{ github.repository }}-v1
