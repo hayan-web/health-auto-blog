@@ -192,18 +192,32 @@ def _build_repair_prompt(original_json: Dict[str, Any]) -> str:
 # ------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------
-def generate_blog_post(client: OpenAI, model: str, keyword: str) -> Dict[str, Any]:
+def generate_blog_post(
+    client: OpenAI,
+    model: str,
+    keyword: str,
+    *,
+    system_prompt: Optional[str] = None,
+    user_prompt: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    1) 생성 → 2) 내부 최소검사 → 3) 실패 시 repair 1회
-    - temperature 파라미터는 아예 사용하지 않습니다(지원 안하는 모델 대비).
+    - 기존 호출: generate_blog_post(client, model, keyword)  ✅ 그대로 동작
+    - 확장 호출: system_prompt / user_prompt 전달 가능
     """
+
+    # 🔒 기본값 = 기존 동작과 100% 동일
+    if system_prompt is None:
+        system_prompt = "You output ONLY valid JSON. No extra text."
+
+    if user_prompt is None:
+        user_prompt = _build_generation_prompt(keyword)
+
     # 1) 생성
-    prompt = _build_generation_prompt(keyword)
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You output ONLY valid JSON. No extra text."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
     )
 
@@ -211,19 +225,20 @@ def generate_blog_post(client: OpenAI, model: str, keyword: str) -> Dict[str, An
     post = _safe_json_loads(text)
     post = _normalize_post(post)
 
-    # 2) 최소검사 통과면 바로 리턴
+    # 2) 최소 검사 통과 시 바로 리턴
     if _quick_constraints_ok(post):
         return post
 
-    # 3) 실패면 repair 1회 (여기가 성공률 핵심)
+    # 3) 실패 시 repair (기존 로직 유지)
     repair_prompt = _build_repair_prompt(post)
     resp2 = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You output ONLY valid JSON. No extra text."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": repair_prompt},
         ],
     )
+
     text2 = resp2.choices[0].message.content or ""
     post2 = _safe_json_loads(text2)
     post2 = _normalize_post(post2)
