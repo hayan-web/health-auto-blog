@@ -2,7 +2,6 @@ import base64
 import os
 import re
 import uuid
-from pathlib import Path
 
 from app.config import Settings
 from app.ai_openai import (
@@ -10,7 +9,7 @@ from app.ai_openai import (
     generate_blog_post,
     generate_thumbnail_title,
 )
-from app.ai_gemini_image import (
+from app.ai_gemini_image import (  # 파일명은 그대로여도 됩니다(내부가 OpenAI 이미지여도 OK)
     make_gemini_client,
     generate_nanobanana_image_png_bytes,
 )
@@ -24,11 +23,12 @@ from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 from app.monetize_coupang import inject_coupang
 
-# ✅ 신규: 이미지 변주 + 품질 점수 + 예산가드
-from app.image_variants import build_image_prompts
-from app.quality import score_post, needs_regen
-from app.budget_guard import BudgetConfig, can_post, add_usage
-
+# ✅ NEW: 품질 점수/재생성
+from app.quality_gate import quality_retry_loop, score_post
+# ✅ NEW: 주제 분기
+from app.prompt_router import guess_topic_from_keyword, build_system_prompt, build_user_prompt
+# ✅ NEW: 발행/비용 가드
+from app.guardrails import GuardConfig, check_limits_or_raise, increment_post_count
 
 S = Settings()
 
@@ -44,26 +44,20 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
 def _fallback_png_bytes(text: str) -> bytes:
     try:
         from PIL import Image, ImageDraw, ImageFont  # type: ignore
-        from io import BytesIO
-
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
-
         try:
             font = ImageFont.truetype("DejaVuSans.ttf", 48)
         except Exception:
             font = ImageFont.load_default()
-
-        msg = (text or "image").strip()[:40]
-        bbox = draw.textbbox((0, 0), msg, font=font)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
+        msg = (text or "health").strip()[:40]
+        box = draw.textbbox((0, 0), msg, font=font)
+        w, h = box[2] - box[0], box[3] - box[1]
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
-
+        from io import BytesIO
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
-
     except Exception:
         tiny_png_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
@@ -80,106 +74,96 @@ def _ensure_str_html(result):
     return str(result), False
 
 
-def _classify_topic(keyword: str) -> str:
-    """
-    2️⃣ 주제별 프롬프트 분기(간단 룰베이스)
-    - 원하면 키워드 리스트/정규식으로 더 정교하게 확장 가능
-    """
-    k = (keyword or "").lower()
-    health = ["갱년기", "혈압", "고지혈증", "수면", "관절", "운동", "스트레스", "식단", "건강", "영양"]
-    it = ["스마트폰", "pc", "윈도우", "아이폰", "안드로이드", "앱", "오류", "설정", "보안", "와이파이"]
-    for w in health:
-        if w in k:
-            return "health"
-    for w in it:
-        if w in k:
-            return "it"
-    return "life"
-
-
-def _save_preview_html(title: str, html: str) -> str:
-    """
-    4️⃣ 발행 전 HTML 미리보기 저장
-    GitHub Actions에서 upload-artifact로 올릴 수 있게 preview/에 저장
-    """
-    preview_dir = Path("preview")
-    preview_dir.mkdir(parents=True, exist_ok=True)
-
-    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", title).strip("-")[:60] or "post"
-    fname = f"{slug}.html"
-    path = preview_dir / fname
-    path.write_text(html, encoding="utf-8")
-    return str(path)
+def _save_preview_html(html: str) -> None:
+    os.makedirs("preview", exist_ok=True)
+    with open("preview/post.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    print("🧾 preview saved: preview/post.html")
 
 
 def run() -> None:
     S = Settings()
 
+    # === 클라이언트 ===
     openai_client = make_openai_client(S.OPENAI_API_KEY)
-    img_client = make_gemini_client(S.OPENAI_API_KEY)  # 내부는 OpenAI 이미지 client
+
+    # ⚠️ 중요: 이미지도 OpenAI로 통일할 거면 여기 키는 OPENAI_API_KEY
+    # (이전 이슈: GOOGLE_API_KEY를 넣어서 401나고 fallback만 업로드됨)
+    img_client = make_gemini_client(S.OPENAI_API_KEY)
 
     state = load_state()
     history = state.get("history", [])
 
-    # 3️⃣ 발행 횟수·API 비용 제어 (예산 가드)
-    cfg = BudgetConfig(
-        max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3) or 3),
-        max_images_per_day=int(getattr(S, "MAX_IMAGES_PER_DAY", 6) or 6),
-        image_cost_usd=float(getattr(S, "IMAGE_COST_USD", 0.011) or 0.011),
-        max_monthly_usd=float(getattr(S, "MAX_MONTHLY_USD", 15.0) or 15.0),
+    # === (3) 발행/비용 가드 ===
+    cfg = GuardConfig(
+        max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
+        max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-    ok, reason = can_post(state, cfg)
-    if not ok:
-        print(f"⛔ 스킵: {reason}")
-        return
+    check_limits_or_raise(state, cfg)
 
     # 1) 키워드 선정
-    keyword, debug = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
+    keyword, debug = pick_keyword_by_naver(
+        S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history
+    )
     print("🔎 선택된 키워드:", keyword)
     print("🧾 키워드 점수(상위 3):", (debug.get("scored") or [])[:3])
 
-    topic = _classify_topic(keyword)
-    print("🧭 topic:", topic)
+    # === (2) 주제 분기 프롬프트 ===
+    topic = guess_topic_from_keyword(keyword)
+    system_prompt = build_system_prompt(topic)
+    user_prompt = build_user_prompt(topic, keyword)
+    print(f"🧭 topic: {topic}")
 
-    # 2) 글 생성 + (중복 회피) + (품질 점수화로 재생성 트리거)
-    MAX_RETRY = 4
-    post = None
+    # 2) 글 생성 + 중복 회피 + (1) 품질 점수화 재생성
+    MAX_RETRY = 3
 
-    for i in range(1, MAX_RETRY + 1):
-        candidate = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
+    def _generate_once():
+        # generate_blog_post 내부가 system/user prompt를 받을 수 있도록 확장되어 있으면 그대로 넘기고,
+        # 아직 없다면 generate_blog_post 안에서 keyword 기반으로 프롬프트를 구성하는 방식으로 구현해도 됩니다.
+        candidate = generate_blog_post(
+            openai_client,
+            S.OPENAI_MODEL,
+            keyword,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
 
-        dup, reason_dup = pick_retry_reason(candidate.get("title", ""), history)
+        dup, reason = pick_retry_reason(candidate.get("title", ""), history)
         if dup:
-            print(f"♻️ 중복 감지({reason_dup}) → 재생성 {i}/{MAX_RETRY}")
-            continue
+            print(f"♻️ 중복 감지({reason}) → 재생성")
+            # 중복이면 강제로 FAIL로 만들어 재생성 루프로
+            candidate["sections"] = []  # 점수 떨어뜨리기
+        return candidate
 
-        score, reasons = score_post(candidate)
-        print(f"🧪 품질 점수: {score}/100", (" / ".join(reasons) if reasons else ""))
-
-        if needs_regen(score, threshold=int(getattr(S, "QUALITY_THRESHOLD", 75) or 75)):
-            print(f"🔁 품질 미달 → 재생성 {i}/{MAX_RETRY}")
-            continue
-
-        post = candidate
-        break
-
-    if not post:
-        raise RuntimeError("생성 실패: 중복/품질 기준을 만족하는 글을 만들지 못했습니다.")
+    post, q = quality_retry_loop(_generate_once, max_retry=MAX_RETRY)
+    print(f"✅ 품질 OK ({q.score}/100) → 진행")
 
     # 3) 썸네일용 짧은 타이틀
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 썸네일 타이틀:", thumb_title)
 
-    # 4) 이미지 프롬프트 다양화(대표/본문)
+    # 4) 이미지 2장 생성 (다양화: 프롬프트/구도/스타일 분리)
     base_prompt = (post.get("img_prompt") or "").strip()
-    hero_prompt, body_prompt = build_image_prompts(base_prompt, keyword)
+    if not base_prompt:
+        base_prompt = f"{keyword} 주제의 블로그 삽화, single scene, no collage, no text, square 1:1"
 
-    # 5) 이미지 2장 생성 (OpenAI 이미지로 통일된 함수)
+    # ✅ 서로 다른 “구도/피사체/렌즈/스타일 힌트”를 넣어 강제로 다르게 만듭니다
+    hero_prompt = (
+        base_prompt
+        + ", wide composition, clean minimal illustration, soft lighting, different subject placement"
+        + ", single scene, no collage, no text, square 1:1"
+    )
+    body_prompt = (
+        base_prompt
+        + ", close-up composition, different angle, different scene elements, more detailed background"
+        + ", single scene, no collage, no text, square 1:1"
+    )
+
     try:
         print("🎨 이미지(상단/대표) 생성 중...")
         hero_img = generate_nanobanana_image_png_bytes(img_client, S.GEMINI_IMAGE_MODEL, hero_prompt)
     except Exception as e:
-        print(f"⚠️ 대표 이미지 생성 실패 → fallback: {e}")
+        print(f"⚠️ 대표 이미지 생성 실패 → 대체 이미지: {e}")
         hero_img = _fallback_png_bytes(keyword)
 
     try:
@@ -192,18 +176,22 @@ def run() -> None:
     hero_img = to_square_1024(hero_img)
     body_img = to_square_1024(body_img)
 
-    # 6) 대표 이미지에 타이틀 오버레이
+    # 5) 대표 이미지에 타이틀 오버레이
     hero_img_titled = add_title_to_image(hero_img, thumb_title)
     hero_img_titled = to_square_1024(hero_img_titled)
 
-    # 7) WP 미디어 업로드
+    # 6) WP 미디어 업로드
     hero_name = make_ascii_filename("featured", "png")
     body_name = make_ascii_filename("body", "png")
 
-    hero_url, hero_media_id = upload_media_to_wp(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name)
-    body_url, _ = upload_media_to_wp(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name)
+    hero_url, hero_media_id = upload_media_to_wp(
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
+    )
+    body_url, _ = upload_media_to_wp(
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
+    )
 
-    # 8) A안 레이아웃 HTML 생성
+    # 7) A안 레이아웃 HTML 생성
     sections = post.get("sections") or []
     outro = post.get("outro") or ""
 
@@ -220,7 +208,7 @@ def run() -> None:
         outro=outro,
     )
 
-    # 9) 쿠팡 삽입 + 실제 삽입 시에만 대가성 문구 최상단
+    # 8) 쿠팡 삽입 + 실제 삽입 시 대가성 문구
     coupang_result = inject_coupang(html, keyword=keyword)
     html_after_coupang, inserted_flag = _ensure_str_html(coupang_result)
     coupang_inserted = inserted_flag or (html_after_coupang != html)
@@ -235,15 +223,16 @@ def run() -> None:
 
     html = html_after_coupang
 
-    # 10) 애드센스 슬롯 3개 삽입
+    # 9) 애드센스 슬롯 3개 삽입
     html = inject_adsense_slots(html)
 
-    # 11) 4️⃣ 발행 전 HTML 미리보기 저장
-    preview_path = _save_preview_html(post["title"], html)
-    print("🧾 preview saved:", preview_path)
+    # ✅ (4번 보강) 미리보기 저장(무조건 생성)
+    _save_preview_html(html)
 
-    # 12) WP 글 발행
+    # 10) publish_to_wp가 content_html 우선 사용
     post["content_html"] = html
+
+    # 11) WP 글 발행
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -254,7 +243,10 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
-    # 13) 히스토리 저장 + 예산 사용량 기록(이미지 2장 + 포스팅 1회)
+    # ✅ 발행 카운트 증가(가드용)
+    increment_post_count(state)
+
+    # 12) 히스토리 저장
     state = add_history_item(
         state,
         {
@@ -264,17 +256,10 @@ def run() -> None:
             "title_fp": _title_fingerprint(post["title"]),
         },
     )
-
-    # 비용/횟수 카운팅(간단 추정)
-    state = add_usage(state, posts=1, images=2, spend_usd=2 * cfg.image_cost_usd)
     save_state(state)
 
     print(f"✅ 발행 완료! post_id={post_id}")
 
 
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as e:
-        print(f"❌ 시스템 종료: {e}")
-        raise
+    run()
