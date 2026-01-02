@@ -1,6 +1,5 @@
 # main.py
 import base64
-import os
 import re
 import uuid
 import random
@@ -60,6 +59,25 @@ from app.life_subtopic_stats import (
 )
 
 
+
+def _sanitize_title(title: str) -> str:
+    """제목에서 연령대/나이 표기를 제거합니다."""
+    if not title:
+        return title
+    t = title
+    # 예: 30대, 40대, 50대, 2030, 3040
+    t = re.sub(r"\b(20|30|40|50|60|70)\s*대\b", "", t)
+    t = re.sub(r"\b(2030|3040|4050|5060)\b", "", t)
+    # 예: 30~40대, 40~50, 20~30
+    t = re.sub(r"\b\d{1,2}\s*~\s*\d{1,2}\s*대?\b", "", t)
+    # 중복 공백 정리
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    # 구두점 앞 공백 정리
+    t = re.sub(r"\s+([!?,.])", r"\1", t)
+    return t
+
+
+
 S = Settings()
 
 
@@ -97,18 +115,6 @@ def _fallback_png_bytes(text: str) -> bytes:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
             "ASsJTYQAAAAASUVORK5CYII="
         )
-
-
-def _save_preview_html(html: str) -> None:
-    """GitHub Actions artifact로 업로드할 미리보기 HTML을 저장합니다."""
-    try:
-        os.makedirs("preview", exist_ok=True)
-        with open("preview/post.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        print("🧾 preview saved: preview/post.html")
-    except Exception as e:
-        # 미리보기 저장 실패는 발행을 막지 않음
-        print(f"⚠️ preview save failed (ignored): {e}")
 
 
 def _stable_seed_int(*parts: str) -> int:
@@ -251,6 +257,12 @@ def run() -> None:
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
+    # 제목 정리(연령대 표기 제거)
+    try:
+        post["title"] = _sanitize_title(post.get("title", ""))
+    except Exception:
+        pass
+
     # ✅ 제목 연령 문구 제거(원천 차단)
     post["title"] = _strip_age_terms(post.get("title", ""))
 
@@ -329,20 +341,6 @@ def run() -> None:
 
     # ✅ 애드센스는 전 글 공통
     html = inject_adsense_slots(html)
-
-    # ✅ Actions 로그에서 "정말 들어갔는지" 바로 확인용
-    ads_count = html.count("class=\"adsbygoogle\"")
-    slot1 = os.getenv("ADSENSE_SLOT1", "").strip()
-    slot2 = os.getenv("ADSENSE_SLOT2", "").strip()
-    slot3 = os.getenv("ADSENSE_SLOT3", "").strip()
-    print(f"📢 adsense blocks in html: {ads_count}")
-    if not (slot1 and slot2 and slot3):
-        print("⚠️ ADSENSE_SLOT1/2/3 중 일부가 비어 있습니다. (실제 광고 노출이 안 될 수 있음)")
-    else:
-        print("✅ ADSENSE_SLOT1/2/3 설정 감지")
-
-    # ✅ 미리보기 저장(워크플로우 artifact 업로드용)
-    _save_preview_html(html)
     post["content_html"] = html
 
     # 8) 발행
