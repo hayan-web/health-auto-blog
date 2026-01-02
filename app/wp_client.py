@@ -2,62 +2,50 @@ import requests
 from typing import Tuple
 
 
-def upload_media_to_wp(
-    wp_url: str,
-    wp_user: str,
-    wp_pw: str,
-    image_bytes: bytes,
-    filename: str,
-    timeout: int = 60,
-) -> Tuple[str, int]:
-    """
-    WP 미디어 업로드
-    - JPG로 업로드(권장): Imsanity가 변환하면서 URL이 바뀌는 문제를 회피
-    - 업로드 후 /media/{id} 재조회로 "최종 source_url" 확보(플러그인 후처리 대비)
-    반환: (source_url, media_id)
-    """
-    wp_url = wp_url.rstrip("/")
-    media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
+def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png"):
+    if not data:
+        return "application/octet-stream", fallback_ext
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg", "jpg"
+    if data.startswith(b"RIFF") and b"WEBP" in data[8:16]:
+        return "image/webp", "webp"
+    return "application/octet-stream", fallback_ext
 
-    # 확장자/헤더 정리 (jpg 고정)
-    if not filename.lower().endswith((".jpg", ".jpeg")):
-        filename = f"{filename.rsplit('.', 1)[0]}.jpg" if "." in filename else f"{filename}.jpg"
+
+def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes: bytes, file_name: str):
+    """WordPress REST API로 미디어 업로드.
+    - 이미지 bytes의 매직바이트로 MIME을 감지해 Content-Type을 맞춥니다.
+    - 파일 확장자도 MIME에 맞게 자동 보정합니다.
+    """
+    import base64
+    import requests
+
+    auth = base64.b64encode(f"{username}:{app_password}".encode("utf-8")).decode("utf-8")
+    mime, ext = _sniff_image_mime_and_ext(img_bytes, fallback_ext="png")
+
+    # file_name 확장자 보정
+    if file_name:
+        base = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        file_name = f"{base}.{ext}"
+    else:
+        file_name = f"image.{ext}"
 
     headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": "image/jpeg",
+        "Authorization": f"Basic {auth}",
+        "Content-Disposition": f'attachment; filename="{file_name}"',
+        "Content-Type": mime,
     }
 
-    res = requests.post(
-        media_endpoint,
-        auth=(wp_user, wp_pw),
-        headers=headers,
-        data=image_bytes,
-        timeout=timeout,
-    )
+    media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
+    resp = requests.post(media_endpoint, headers=headers, data=img_bytes, timeout=90)
 
-    print("🖼️ WP media status:", res.status_code)
-    print("🖼️ WP media resp:", (res.text or "")[:300])
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Media upload failed: {resp.status_code} {resp.text[:500]}")
 
-    if res.status_code not in (200, 201):
-        raise RuntimeError(f"미디어 업로드 실패: {res.status_code} / {res.text}")
-
-    j = res.json()
-    media_id = j["id"]
-
-    # ✅ 플러그인(예: Imsanity)이 업로드 직후 파일/URL을 바꿔도 최종 URL을 다시 가져오기
-    try:
-        get_ep = f"{wp_url}/wp-json/wp/v2/media/{media_id}"
-        res2 = requests.get(get_ep, auth=(wp_user, wp_pw), timeout=timeout)
-        if res2.status_code == 200:
-            j2 = res2.json()
-            final_url = j2.get("source_url") or j.get("source_url")
-            return final_url, media_id
-    except Exception as e:
-        print("⚠️ media 재조회 실패(무시하고 진행):", e)
-
-    return j["source_url"], media_id
-
+    j = resp.json()
+    return j.get("source_url"), j.get("id")
 
 def publish_to_wp(
     wp_url: str,
