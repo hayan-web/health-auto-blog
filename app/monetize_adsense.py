@@ -1,191 +1,98 @@
 import os
 import re
+from typing import Optional
 
 
-# 중복 삽입 방지용 마커
-_SLOT1_MARK = "<!--ADSENSE:SLOT1-->"
-_SLOT2_MARK = "<!--ADSENSE:SLOT2-->"
-_SLOT3_MARK = "<!--ADSENSE:SLOT3-->"
+# formatter_v2.py 에서 넣어둔 마커를 치환합니다.
+MARK_TOP = "<!--AD_TOP-->"
+MARK_MID = "<!--AD_MID-->"
+MARK_BOTTOM = "<!--AD_BOTTOM-->"
 
 
-def _get_slot_code(slot_no: int) -> str:
+def _env(name: str) -> str:
+    v = os.getenv(name, "")
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _is_full_snippet(v: str) -> bool:
+    low = (v or "").lower()
+    return ("<ins" in low) or ("adsbygoogle" in low) or ("data-ad-slot" in low)
+
+
+def _render_adsense(slot_value: str) -> str:
+    """slot_value:
+    - 숫자만 들어오면(예: 1234567890) => ins+script로 감쌉니다.
+    - 이미 <ins ...> 형태면 그대로 사용합니다.
     """
-    슬롯별 광고 코드를 ENV에서 가져옵니다.
-    - ADSENSE_SLOT1
-    - ADSENSE_SLOT2
-    - ADSENSE_SLOT3
-    값이 없으면 빈 문자열 반환.
-    """
-    key = f"ADSENSE_SLOT{slot_no}"
-    code = (os.getenv(key) or "").strip()
-    return code
-
-
-def _wrap(code: str, slot_no: int) -> str:
-    """
-    광고 코드 감싸기 (레이아웃 깨짐 방지)
-    """
-    if not code:
+    v = (slot_value or "").strip()
+    if not v:
         return ""
-    return (
-        f"\n<div class='adsense-slot adsense-slot-{slot_no}' "
-        f"style='margin:18px 0; padding:0; text-align:center;'>\n"
-        f"{code}\n"
-        f"</div>\n"
+
+    if _is_full_snippet(v):
+        # 사용자가 전체 코드를 넣었으면 그대로 사용
+        return v
+
+    # 숫자만 들어온 경우: 표준 in-article 광고 코드로 감쌉니다.
+    slot = re.sub(r"[^0-9]", "", v)
+    if not slot:
+        return ""
+
+    client = _env("ADSENSE_CLIENT") or _env("GOOGLE_ADSENSE_CLIENT")
+    if not client:
+        # client가 없으면 숫자가 그대로 노출될 수 있으니 비워버립니다.
+        print("⚠️ ADSENSE_CLIENT 누락: 광고 삽입 스킵(슬롯만 있으면 숫자가 노출될 수 있어 비웁니다).")
+        return ""
+
+    ins = (
+        f'<ins class="adsbygoogle" style="display:block" '
+        f'data-ad-client="{client}" data-ad-slot="{slot}" '
+        f'data-ad-format="auto" data-full-width-responsive="true"></ins>'
+        f'\n<script>(adsbygoogle = window.adsbygoogle || []).push({{}});</script>'
     )
+    return ins
 
 
-def _already_injected(html: str, mark: str) -> bool:
-    return mark in (html or "")
-
-
-def _insert_before_first(html: str, patterns: list[str], insert_html: str) -> tuple[str, bool]:
-    """
-    patterns 중 하나라도 매칭되면, 그 매칭 시작 위치 앞에 insert_html을 삽입.
-    """
-    if not html or not insert_html:
-        return html, False
-
-    for pat in patterns:
-        m = re.search(pat, html, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            idx = m.start()
-            return html[:idx] + insert_html + html[idx:], True
-
-    return html, False
-
-
-def _insert_after_first(html: str, patterns: list[str], insert_html: str) -> tuple[str, bool]:
-    """
-    patterns 중 하나라도 매칭되면, 그 매칭 끝 위치 뒤에 insert_html을 삽입.
-    """
-    if not html or not insert_html:
-        return html, False
-
-    for pat in patterns:
-        m = re.search(pat, html, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            idx = m.end()
-            return html[:idx] + insert_html + html[idx:], True
-
-    return html, False
-
-
-def _append_to_end(html: str, insert_html: str) -> tuple[str, bool]:
-    """
-    맨 아래(가능하면 </div></body></html> 앞)로 삽입.
-    """
-    if not html or not insert_html:
-        return html, False
-
-    # </body> 앞
-    m = re.search(r"</body\s*>", html, flags=re.IGNORECASE)
-    if m:
-        idx = m.start()
-        return html[:idx] + insert_html + html[idx:], True
-
-    # </html> 앞
-    m = re.search(r"</html\s*>", html, flags=re.IGNORECASE)
-    if m:
-        idx = m.start()
-        return html[:idx] + insert_html + html[idx:], True
-
-    # 그냥 끝
-    return html + insert_html, True
+def _maybe_include_script() -> str:
+    include = _env("ADSENSE_INCLUDE_SCRIPT")
+    if include and include not in ("0", "false", "False", "FALSE"):
+        client = _env("ADSENSE_CLIENT") or _env("GOOGLE_ADSENSE_CLIENT")
+        if not client:
+            return ""
+        return (
+            f'<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={client}" '
+            f'crossorigin="anonymous"></script>'
+        )
+    return ""
 
 
 def inject_adsense_slots(html: str) -> str:
-    """
-    ✅ 수동 광고 3개 자동 삽입
-    1) 요약박스 위에 1개
-    2) 소제목 카드(첫 섹션) 위에 1개
-    3) 글 맨 아래에 1개
-
-    ENV에 ADSENSE_SLOT1~3가 없으면 해당 슬롯은 삽입되지 않습니다.
-    이미 마커가 있으면 중복 삽입하지 않습니다.
+    """본문 HTML에 3개 슬롯(상/중/하)을 자연스럽게 삽입합니다.
+    - format_post_v2가 넣어둔 <!--AD_TOP-->, <!--AD_MID-->, <!--AD_BOTTOM--> 마커를 사용합니다.
+    - 슬롯 값은 env로 받습니다:
+      - ADSENSE_SLOT_TOP / MID / BOTTOM
+      - 또는 ADSENSE_SLOT_1 / 2 / 3 (호환)
     """
     if not html:
         return html
 
-    slot1_code = _get_slot_code(1)
-    slot2_code = _get_slot_code(2)
-    slot3_code = _get_slot_code(3)
+    top_v = _env("ADSENSE_SLOT_TOP") or _env("ADSENSE_SLOT_1")
+    mid_v = _env("ADSENSE_SLOT_MID") or _env("ADSENSE_SLOT_2")
+    bot_v = _env("ADSENSE_SLOT_BOTTOM") or _env("ADSENSE_SLOT_3")
 
-    # 하나도 없으면 그대로
-    if not (slot1_code or slot2_code or slot3_code):
-        return html
+    top = _render_adsense(top_v)
+    mid = _render_adsense(mid_v)
+    bot = _render_adsense(bot_v)
 
+    # 광고 설정이 하나도 없으면 마커만 제거
+    if not (top or mid or bot):
+        return html.replace(MARK_TOP, "").replace(MARK_MID, "").replace(MARK_BOTTOM, "")
+
+    script_tag = _maybe_include_script()
+
+    # 마커 치환
     out = html
-
-    # -----------------------------
-    # SLOT 1: 요약박스 위
-    # -----------------------------
-    if slot1_code and not _already_injected(out, _SLOT1_MARK):
-        slot1 = _SLOT1_MARK + _wrap(slot1_code, 1)
-
-        # 요약박스 후보 패턴들
-        summary_patterns = [
-            r"<div[^>]+class=[\"'][^\"']*(summary|summary-box|summarybox|key-summary|highlight-summary)[^\"']*[\"'][^>]*>",
-            r"<section[^>]+class=[\"'][^\"']*(summary|summary-box|summarybox|key-summary|highlight-summary)[^\"']*[\"'][^>]*>",
-            r"<!--\s*SUMMARY\s*-->",
-        ]
-
-        out, inserted = _insert_before_first(out, summary_patterns, slot1)
-
-        # 그래도 못 찾으면: 첫 번째 H2(소제목) 위에라도 넣기
-        if not inserted:
-            out, inserted = _insert_before_first(
-                out,
-                [r"<h2[^>]*>", r"<h3[^>]*>"],
-                slot1,
-            )
-
-        # 그래도 실패하면 문서 상단
-        if not inserted:
-            out = slot1 + out
-
-    # -----------------------------
-    # SLOT 2: 소제목 카드 위
-    # -----------------------------
-    if slot2_code and not _already_injected(out, _SLOT2_MARK):
-        slot2 = _SLOT2_MARK + _wrap(slot2_code, 2)
-
-        # 소제목 카드/섹션 카드 후보 패턴들
-        section_patterns = [
-            r"<div[^>]+class=[\"'][^\"']*(section-card|content-card|card|topic-card|post-card)[^\"']*[\"'][^>]*>",
-            r"<section[^>]+class=[\"'][^\"']*(section-card|content-card|card|topic-card|post-card)[^\"']*[\"'][^>]*>",
-            r"<h2[^>]*>",  # 마지막 fallback
-        ]
-
-        out, inserted = _insert_before_first(out, section_patterns, slot2)
-
-        # 못 찾으면: summary 끝난 다음에 넣기
-        if not inserted:
-            out, inserted = _insert_after_first(
-                out,
-                [
-                    r"</div>\s*<!--\s*SUMMARY\s*END\s*-->",
-                    r"</section>\s*<!--\s*SUMMARY\s*END\s*-->",
-                ],
-                slot2,
-            )
-
-        # 그래도 실패하면: 상단 다음(대가성/첫 이미지 다음)쯤에 삽입
-        if not inserted:
-            out, inserted = _insert_after_first(
-                out,
-                [r"</div>\s*</div>", r"</div>\s*<div"],
-                slot2,
-            )
-
-        if not inserted:
-            out = out + slot2  # 최후: 아래로
-
-    # -----------------------------
-    # SLOT 3: 맨 아래
-    # -----------------------------
-    if slot3_code and not _already_injected(out, _SLOT3_MARK):
-        slot3 = _SLOT3_MARK + _wrap(slot3_code, 3)
-        out, _ = _append_to_end(out, slot3)
+    out = out.replace(MARK_TOP, (script_tag + "\n" + top).strip() if top else script_tag)
+    out = out.replace(MARK_MID, mid or "")
+    out = out.replace(MARK_BOTTOM, bot or "")
 
     return out
