@@ -1,5 +1,6 @@
 # main.py
 import base64
+import os
 import re
 import uuid
 import random
@@ -95,9 +96,24 @@ def _fallback_png_bytes(text: str) -> bytes:
 
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 48)
-        except Exception:
+        # GitHub Actions(ubuntu)에는 noto cjk 폰트가 설치되므로, 한글 깨짐(□□□)을 최대한 방지합니다.
+        font = None
+        for p in (
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+            "DejaVuSans.ttf",
+        ):
+            try:
+                if p == "DejaVuSans.ttf":
+                    font = ImageFont.truetype(p, 48)
+                elif os.path.exists(p):
+                    font = ImageFont.truetype(p, 48)
+                if font:
+                    break
+            except Exception:
+                continue
+        if font is None:
             font = ImageFont.load_default()
 
         msg = (text or "image").strip()[:40]
