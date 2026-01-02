@@ -1,47 +1,61 @@
-# app/budget_guard.py
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Any, Dict, Tuple
+from dataclasses import dataclass
+import datetime as dt
+from typing import Dict, Tuple
 
 
-def _today_kst() -> str:
-    # runner는 UTC일 수도 있으니, KST 정확히 하려면 Settings에 timezone 넣는 게 베스트
-    # 여기서는 단순히 날짜만 사용(UTC여도 "오늘 제한" 정도만)
-    return datetime.utcnow().strftime("%Y-%m-%d")
+@dataclass
+class BudgetConfig:
+    max_posts_per_day: int = 3
+    max_images_per_day: int = 6
+
+    # 간단 추정치(원하면 더 정교화 가능)
+    # 이미지 단가: gpt-image-1-mini medium ~ $0.011/이미지 (대략)
+    image_cost_usd: float = 0.011
+
+    # 월 예산(달러)
+    max_monthly_usd: float = 10.0
 
 
-def _month_utc() -> str:
-    return datetime.utcnow().strftime("%Y-%m")
+def _today_key() -> str:
+    return dt.datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def assert_can_run(state: Dict[str, Any], daily_limit: int = 3) -> None:
+def _month_key() -> str:
+    return dt.datetime.utcnow().strftime("%Y-%m")
+
+
+def can_post(state: Dict, cfg: BudgetConfig) -> Tuple[bool, str]:
     """
-    - 기존 state 구조를 건드리지 않고 state['budget']만 사용
-    - daily_limit만 기본 적용 (비용은 추정치로만 누적)
+    state.json 기반으로 오늘/이번달 제한 체크
     """
-    budget = state.get("budget") or {}
-    today = _today_kst()
+    usage = state.get("usage", {})
+    day = _today_key()
+    month = _month_key()
 
-    if budget.get("date") != today:
-        budget = {"date": today, "posts_today": 0, "month": _month_utc(), "estimated_cost_usd": 0.0}
+    day_posts = usage.get("posts", {}).get(day, 0)
+    day_images = usage.get("images", {}).get(day, 0)
+    month_spend = usage.get("spend_usd", {}).get(month, 0.0)
 
-    posts_today = int(budget.get("posts_today") or 0)
-    if posts_today >= int(daily_limit):
-        raise RuntimeError(f"오늘 발행 제한 초과: posts_today={posts_today}, limit={daily_limit}")
+    if day_posts >= cfg.max_posts_per_day:
+        return False, f"일일 포스팅 제한 초과({day_posts}/{cfg.max_posts_per_day})"
+    if day_images >= cfg.max_images_per_day:
+        return False, f"일일 이미지 제한 초과({day_images}/{cfg.max_images_per_day})"
+    if month_spend >= cfg.max_monthly_usd:
+        return False, f"월 예산 초과(${month_spend:.2f}/${cfg.max_monthly_usd:.2f})"
+    return True, "OK"
 
-    state["budget"] = budget
 
+def add_usage(state: Dict, posts: int = 0, images: int = 0, spend_usd: float = 0.0) -> Dict:
+    usage = state.setdefault("usage", {})
+    posts_map = usage.setdefault("posts", {})
+    images_map = usage.setdefault("images", {})
+    spend_map = usage.setdefault("spend_usd", {})
 
-def mark_post_published(state: Dict[str, Any], est_cost_usd: float = 0.0) -> Dict[str, Any]:
-    budget = state.get("budget") or {}
-    today = _today_kst()
+    day = _today_key()
+    month = _month_key()
 
-    if budget.get("date") != today:
-        budget = {"date": today, "posts_today": 0, "month": _month_utc(), "estimated_cost_usd": 0.0}
+    posts_map[day] = int(posts_map.get(day, 0)) + int(posts)
+    images_map[day] = int(images_map.get(day, 0)) + int(images)
 
-    budget["posts_today"] = int(budget.get("posts_today") or 0) + 1
-    budget["estimated_cost_usd"] = float(budget.get("estimated_cost_usd") or 0.0) + float(est_cost_usd or 0.0)
-
-    state["budget"] = budget
+    spend_map[month] = float(spend_map.get(month, 0.0)) + float(spend_usd)
     return state
