@@ -64,17 +64,18 @@ jobs:
 
           # OpenAI
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 선택: 이미지 키를 분리하고 싶을 때만
+          # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-          # ✅ AdSense: 아래 4개는 Secrets로 추가해 주세요.
-          #    ADSENSE_CLIENT = ca-pub-xxxxxxxxxxxxxxxx
-          #    ADSENSE_SLOT1/2/3 = 글 본문에 삽입할 슬롯 ID
+          # (선택) Gemini를 진짜로 쓸 때만 필요합니다.
+          # OpenAI-only 모드면 secrets에 없어도 되고, Settings에서도 필수 아님.
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+          # ✅ AdSense (없으면 본문 광고 슬롯은 삽입되지 않습니다)
           ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
           ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
           ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
           ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
-
-          # 선택: 이미지 키를 분리하고 싶을 때만
-          # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
           # WordPress
           WP_URL: ${{ secrets.WP_URL }}
