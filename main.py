@@ -27,6 +27,7 @@ from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
 from app.monetize_coupang import inject_coupang
 from app.seed_keywords import get_seed_keywords
+from app.blacklist import is_blacklisted, add_blacklist
 
 # ✅ 시간대 기반 주제 분기
 from app.time_router import get_kst_hour, topic_by_kst_hour
@@ -180,6 +181,12 @@ try:
         history,
         seed_keywords=seed_keywords,
     )
+    
+    # 🚫 블랙리스트 키워드면 이번 회차 스킵
+    if is_blacklisted(state, keyword):
+        print(f"⛔ 블랙리스트 키워드 스킵: {keyword}")
+        return
+
 except TypeError:
     # ✅ picker가 아직 seed_keywords 인자를 지원 안 하면
     # ENV를 임시로 덮어써서 기존 picker를 그대로 활용(틀 안 깨짐)
@@ -232,8 +239,20 @@ except TypeError:
             candidate["sections"] = []
         return candidate
 
-    post, q = quality_retry_loop(_generate_once, max_retry=MAX_RETRY)
-    print(f"✅ 품질 OK ({q.score}/100) → 진행")
+    try:
+        post, q = quality_retry_loop(_generate_once, max_retry=MAX_RETRY)
+        print(f"✅ 품질 OK ({q.score}/100) → 진행")
+    except Exception as e:
+        print(f"❌ 품질 재생성 실패 → 키워드 블랙리스트: {keyword}")
+        state = add_blacklist(
+            state,
+            keyword,
+            days=3,
+            reason=f"quality_retry_failed: {e}",
+        )
+        save_state(state)
+        return
+
 
     # 3) 썸네일용 짧은 타이틀
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
