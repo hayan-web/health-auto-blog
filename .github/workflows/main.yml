@@ -50,10 +50,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: preview-html
-          path: preview/
+          name: preview-html-${{ github.run_id }}
+          path: preview/*.html
           if-no-files-found: warn
-          overwrite: true
 
       - name: Save state cache
         if: always()
