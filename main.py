@@ -28,6 +28,7 @@ from app.dedupe import pick_retry_reason, _title_fingerprint
 from app.keyword_picker import pick_keyword_by_naver
 from app.click_ingest import ingest_click_log
 from app.prioritizer import pick_best_publishing_combo
+from app.cooldown import CooldownRule, apply_cooldown_rules
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
@@ -320,6 +321,14 @@ def run() -> None:
     # 가드레일 카운트 증가(기존)
     increment_post_count(state)
 
+    # ✅ (12) 성과 낮은 조합 자동 중단(쿨다운)
+    rule = CooldownRule(
+        min_impressions=int(getattr(S, "COOLDOWN_MIN_IMPRESSIONS", 120)),
+        ctr_floor=float(getattr(S, "COOLDOWN_CTR_FLOOR", 0.0025)),
+        cooldown_days=int(getattr(S, "COOLDOWN_DAYS", 3)),
+    )
+    state = apply_cooldown_rules(state, topic=topic, img=image_style, tv=thumb_variant, rule=rule)
+    
     # 히스토리 저장(기존)
     state = add_history_item(
         state,
