@@ -1,66 +1,74 @@
-# app/quality.py
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Dict, Tuple, List
 
 
-@dataclass
-class QualityResult:
-    score: int
-    reasons: List[str]
+def _word_count(s: str) -> int:
+    if not s:
+        return 0
+    return len(re.findall(r"\S+", s))
 
 
-def _len(s: str) -> int:
-    return len((s or "").strip())
-
-
-def score_post(post: Dict[str, Any]) -> QualityResult:
+def score_post(post: Dict) -> Tuple[int, List[str]]:
     """
-    0~100 품질 점수
-    - sections가 있으면 그걸 기준으로 평가(권장)
-    - 없으면 content/body 기준으로 최소 평가
+    0~100 점수(휴리스틱)
+    - 너무 짧거나
+    - 섹션 구조 없거나
+    - 반복/스팸 느낌 강하면 감점
     """
-    reasons: List[str] = []
+    reasons = []
     score = 100
 
     title = (post.get("title") or "").strip()
-    if _len(title) < 10:
+    content = (post.get("content") or post.get("body") or "").strip()
+    intro = (post.get("intro") or "").strip()
+    outro = (post.get("outro") or "").strip()
+    sections = post.get("sections") or []
+
+    # 제목
+    if len(title) < 8:
         score -= 15
-        reasons.append("title이 너무 짧음(10자 미만)")
+        reasons.append("제목이 너무 짧음")
+    if len(title) > 60:
+        score -= 10
+        reasons.append("제목이 너무 김")
 
-    img_prompt = (post.get("img_prompt") or "").lower()
-    if "square" not in img_prompt and "1:1" not in img_prompt:
-        score -= 5
-        reasons.append("img_prompt에 1:1(square) 힌트가 약함")
+    # 본문 길이
+    wc = _word_count(content)
+    # content가 비어있고 sections 기반이면 sections로 대체 측정
+    if wc < 200 and isinstance(sections, list) and sections:
+        merged = " ".join([(s.get("body") or "") for s in sections if isinstance(s, dict)])
+        wc = _word_count(merged)
 
-    sections = post.get("sections")
-    if isinstance(sections, list) and sections:
-        if len(sections) < 4:
-            score -= 15
-            reasons.append("sections 개수가 너무 적음(4개 미만)")
+    if wc < 350:
+        score -= 25
+        reasons.append(f"본문이 짧음({wc} words)")
+    elif wc < 600:
+        score -= 10
+        reasons.append(f"본문이 다소 짧음({wc} words)")
 
-        for idx, sec in enumerate(sections, start=1):
-            body = ""
-            if isinstance(sec, dict):
-                body = (sec.get("body") or sec.get("content") or "").strip()
-            elif isinstance(sec, str):
-                body = sec.strip()
+    # 섹션 구조
+    if not sections or not isinstance(sections, list):
+        score -= 15
+        reasons.append("섹션 구조 없음(sections 비어있음)")
 
-            if _len(body) < 140:
-                score -= 6
-                reasons.append(f"섹션{idx}: body가 너무 짧음(140자 미만)")
-    else:
-        # fallback: content/body 기반 최소 검사
-        raw = (post.get("content") or post.get("body") or "").strip()
-        if _len(raw) < 800:
-            score -= 20
-            reasons.append("본문이 너무 짧음(800자 미만)")
+    # 반복 감점(단순 휴리스틱)
+    combined = " ".join([title, intro, content, outro])
+    if combined:
+        # 같은 문장/구가 과하게 반복되는지 간단 체크
+        tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", combined.lower())
+        if len(tokens) > 50:
+            top = {}
+            for t in tokens:
+                top[t] = top.get(t, 0) + 1
+            worst = max(top.values())
+            if worst >= 18:
+                score -= 15
+                reasons.append("단어 반복이 과함")
 
-    # 보정
-    if score < 0:
-        score = 0
-    if score > 100:
-        score = 100
+    # 점수 하한/상한
+    score = max(0, min(100, score))
+    return score, reasons
 
-    return QualityResult(score=score, reasons=reasons)
+
+def needs_regen(score: int, threshold: int = 75) -> bool:
+    return score < threshold
