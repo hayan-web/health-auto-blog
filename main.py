@@ -1,7 +1,6 @@
 import base64
 import re
 import uuid
-from io import BytesIO
 
 from app.config import Settings
 from app.ai_openai import (
@@ -13,6 +12,7 @@ from app.ai_gemini_image import (
     make_gemini_client,
     generate_nanobanana_image_png_bytes,
 )
+from app.ai_openai_image import generate_openai_image_png_bytes  # ✅ 추가
 from app.thumb_overlay import to_square_1024, add_title_to_image
 from app.wp_client import upload_media_to_wp, publish_to_wp
 from app.store import load_state, save_state, add_history_item
@@ -30,7 +30,7 @@ from app.monetize_coupang import inject_coupang
 S = Settings()
 
 
-def make_ascii_filename(prefix: str, ext: str = "jpg") -> str:
+def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
     prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
     if not prefix:
@@ -40,12 +40,11 @@ def make_ascii_filename(prefix: str, ext: str = "jpg") -> str:
 
 def _fallback_png_bytes(text: str) -> bytes:
     """
-    Gemini가 실패할 때 대체 이미지 생성.
-    - PIL 있으면 1024x1024로 텍스트 넣어 생성
-    - PIL 없으면 최소 PNG(1x1)라도 반환해서 파이프라인이 죽지 않게
+    최후의 대체 이미지(파이프라인 생존용)
     """
     try:
         from PIL import Image, ImageDraw, ImageFont  # type: ignore
+        from io import BytesIO
 
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
@@ -55,9 +54,10 @@ def _fallback_png_bytes(text: str) -> bytes:
         except Exception:
             font = ImageFont.load_default()
 
-        msg = (text or "health").strip()[:40]
+        msg = (text or "image").strip()[:40]
         bbox = draw.textbbox((0, 0), msg, font=font)
-        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
 
         buf = BytesIO()
@@ -74,7 +74,7 @@ def _fallback_png_bytes(text: str) -> bytes:
 
 def _ensure_str_html(result):
     """
-    inject_coupang 반환 케이스 커버:
+    inject_coupang 반환 형태 호환:
     - str
     - (str, bool)
     """
@@ -85,30 +85,19 @@ def _ensure_str_html(result):
     return str(result), False
 
 
-def _normalize_url(url: str) -> str:
-    # WP 응답에 https:\/\/ 처럼 들어오는 케이스 방지
-    return (url or "").replace("\\/", "/").strip()
-
-
-def _to_jpeg_bytes(img_bytes: bytes, quality: int = 92) -> bytes:
+def _is_likely_image_bytes(b: bytes) -> bool:
     """
-    업로드를 '무조건 JPG'로 통일해서
-    Imsanity/리사이즈/확장자 변경 이슈로 본문 이미지가 깨지는 걸 차단합니다.
+    PNG/JPG 시그니처 기반으로 '진짜 이미지'인지 판단
     """
-    from PIL import Image  # type: ignore
-
-    im = Image.open(BytesIO(img_bytes))
-    if im.mode in ("RGBA", "LA"):
-        # 투명 배경은 흰색으로 합성
-        bg = Image.new("RGB", im.size, (255, 255, 255))
-        bg.paste(im, mask=im.split()[-1])
-        im = bg
-    else:
-        im = im.convert("RGB")
-
-    out = BytesIO()
-    im.save(out, format="JPEG", quality=quality, optimize=True)
-    return out.getvalue()
+    if not b or len(b) < 12:
+        return False
+    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if b.startswith(b"\xff\xd8\xff"):
+        return True
+    if b.startswith(b"RIFF") and b[8:12] == b"WEBP":
+        return True
+    return False
 
 
 def run() -> None:
@@ -148,58 +137,76 @@ def run() -> None:
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 썸네일 타이틀:", thumb_title)
 
-    # 4) 이미지 2장 생성 (실패 시 fallback)
+    # 4) 이미지 2장 생성: Gemini → (이미지 아닐 때) OpenAI 이미지로 강제 대체 → 그래도 실패 시 fallback
     hero_prompt = (post.get("img_prompt") or "").strip()
     if not hero_prompt:
         hero_prompt = f"{keyword} 주제의 건강 정보 블로그 삽화, single scene, no collage, no text, square 1:1"
 
     body_prompt = hero_prompt + ", single scene, no collage, different composition, different angle, no text, square 1:1"
 
+    # --- hero ---
+    hero_img = b""
     try:
         print("🎨 Gemini 이미지(상단/대표) 생성 중...")
-        hero_png = generate_nanobanana_image_png_bytes(
+        hero_img = generate_nanobanana_image_png_bytes(
             gemini_client, S.GEMINI_IMAGE_MODEL, hero_prompt
         )
+        if not _is_likely_image_bytes(hero_img):
+            raise RuntimeError("Gemini 반환이 PNG/JPG/WEBP 이미지가 아닙니다.")
     except Exception as e:
-        print(f"⚠️ 대표 이미지 생성 실패 → 대체 이미지로 진행: {e}")
-        hero_png = _fallback_png_bytes(f"{keyword}")
+        print(f"⚠️ Gemini 대표 이미지 실패 → OpenAI 이미지로 대체: {e}")
+        try:
+            hero_img = generate_openai_image_png_bytes(
+                openai_client,
+                model=getattr(S, "OPENAI_IMAGE_MODEL", "gpt-image-1"),
+                prompt=hero_prompt,
+                size="1024x1024",
+            )
+        except Exception as e2:
+            print(f"⚠️ OpenAI 대표 이미지도 실패 → fallback: {e2}")
+            hero_img = _fallback_png_bytes(keyword)
 
+    # --- body ---
+    body_img = b""
     try:
         print("🎨 Gemini 이미지(중간) 생성 중...")
-        body_png = generate_nanobanana_image_png_bytes(
+        body_img = generate_nanobanana_image_png_bytes(
             gemini_client, S.GEMINI_IMAGE_MODEL, body_prompt
         )
+        if not _is_likely_image_bytes(body_img):
+            raise RuntimeError("Gemini 반환이 PNG/JPG/WEBP 이미지가 아닙니다.")
     except Exception as e:
-        print(f"⚠️ 중간 이미지 생성 실패 → 대표 이미지 재사용: {e}")
-        body_png = hero_png
+        print(f"⚠️ Gemini 중간 이미지 실패 → OpenAI 이미지로 대체: {e}")
+        try:
+            body_img = generate_openai_image_png_bytes(
+                openai_client,
+                model=getattr(S, "OPENAI_IMAGE_MODEL", "gpt-image-1"),
+                prompt=body_prompt,
+                size="1024x1024",
+            )
+        except Exception as e2:
+            print(f"⚠️ OpenAI 중간 이미지도 실패 → 대표 이미지 재사용: {e2}")
+            body_img = hero_img
 
-    # 5) 1:1 고정
-    hero_png = to_square_1024(hero_png)
-    body_png = to_square_1024(body_png)
+    hero_img = to_square_1024(hero_img)
+    body_img = to_square_1024(body_img)
 
-    # 6) 대표 이미지에 타이틀 오버레이 (여기까지는 PNG로 작업)
-    hero_png_titled = add_title_to_image(hero_png, thumb_title)
-    hero_png_titled = to_square_1024(hero_png_titled)
+    # 5) 대표 이미지에 타이틀 오버레이
+    hero_img_titled = add_title_to_image(hero_img, thumb_title)
+    hero_img_titled = to_square_1024(hero_img_titled)
 
-    # ✅ 7) 업로드는 무조건 JPG로 통일 (Imsanity/확장자 변경으로 본문 깨짐 방지)
-    hero_jpg = _to_jpeg_bytes(hero_png_titled)
-    body_jpg = _to_jpeg_bytes(body_png)
-
-    hero_name = make_ascii_filename("featured", "jpg")
-    body_name = make_ascii_filename("body", "jpg")
+    # 6) WP 미디어 업로드 (png로 올려도 Imsanity가 jpg로 변환 가능)
+    hero_name = make_ascii_filename("featured", "png")
+    body_name = make_ascii_filename("body", "png")
 
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_jpg, hero_name
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, hero_img_titled, hero_name
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_jpg, body_name
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, body_img, body_name
     )
 
-    # URL 정규화 (https:\/\/ 방지)
-    hero_url = _normalize_url(hero_url)
-    body_url = _normalize_url(body_url)
-
-    # 8) A안 레이아웃 HTML 생성
+    # 7) A안 레이아웃 HTML 생성
     sections = post.get("sections") or []
     outro = post.get("outro") or ""
 
@@ -208,7 +215,7 @@ def run() -> None:
         keyword=keyword,
         hero_url=hero_url,
         body_url=body_url,
-        disclosure_html="",  # 쿠팡 실제 삽입 시 아래에서 채움
+        disclosure_html="",
         summary_bullets=post.get("summary_bullets") or None,
         sections=sections if isinstance(sections, list) else [],
         warning_bullets=post.get("warning_bullets") or None,
@@ -216,7 +223,7 @@ def run() -> None:
         outro=outro,
     )
 
-    # 9) 쿠팡 삽입 + “실제 삽입”일 때만 대가성 문구 최상단
+    # 8) 쿠팡 삽입 + 실제 삽입 시에만 대가성 문구
     coupang_result = inject_coupang(html, keyword=keyword)
     html_after_coupang, inserted_flag = _ensure_str_html(coupang_result)
     coupang_inserted = inserted_flag or (html_after_coupang != html)
@@ -231,13 +238,13 @@ def run() -> None:
 
     html = html_after_coupang
 
-    # 10) 애드센스 수동 슬롯 3개 삽입
+    # 9) 애드센스 수동 슬롯 3개 삽입
     html = inject_adsense_slots(html)
 
-    # 11) publish_to_wp가 content_html을 우선 사용하도록 교체
+    # 10) publish_to_wp가 content_html을 우선 사용하도록 교체
     post["content_html"] = html
 
-    # 12) WP 글 발행
+    # 11) WP 글 발행
     post_id = publish_to_wp(
         S.WP_URL,
         S.WP_USERNAME,
@@ -248,7 +255,7 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
-    # 13) 히스토리 저장
+    # 12) 히스토리 저장
     state = add_history_item(
         state,
         {
