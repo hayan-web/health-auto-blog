@@ -105,21 +105,11 @@ def _stable_seed_int(*parts: str) -> int:
 
 
 def _sanitize_title_remove_age(title: str) -> str:
-    """
-    예: '30~50대를 위한 ...' / '20-30대' / '40대' 같은 표현 제거 (기본 ON)
-    """
     if not title:
         return title
-
     t = title
-
-    # 30~50대 / 30-50대 / 30~ 50대 등
     t = re.sub(r"\b\d{2}\s*[~-]\s*\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
-
-    # 20대/30대/40대/50대 단독
     t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
-
-    # '중년', '장년' 같은 단어는 원하시면 여기도 제거 가능하지만 일단 유지
     t = re.sub(r"\s{2,}", " ", t).strip()
     t = re.sub(r"^[\-\:\|\·\s]+", "", t).strip()
     return t
@@ -129,47 +119,90 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
     """
     style_mode:
       - "watercolor" : 수채화
-      - "photo"      : 실사/사진
+      - "photo"      : 실사/제품컷/라이프스타일 사진(쿠팡)
       - 그 외        : 학습 스타일 문자열(약하게 힌트)
     """
-    HERO_COMPO = [
-        "centered subject, simple background, soft daylight, 35mm feel",
-        "clean composition, lots of negative space, gentle light",
-        "iconic main object, calm mood, minimal props",
-    ]
-    BODY_COMPO = [
-        "different angle, wider shot, secondary elements, 24mm feel",
-        "off-center composition, detail emphasis, different perspective",
-        "close-up detail shot, different framing, rim light",
-    ]
-
     rng = random.Random(seed + (1 if variant == "hero" else 2))
-    comp = rng.choice(HERO_COMPO if variant == "hero" else BODY_COMPO)
 
+    # --- 공통 금지/품질 규칙 (강화) ---
     base_raw = (base or "").strip()
     low = base_raw.lower()
 
-    # 필수 규칙(콜라주/텍스트/비율 방지)
-    if "single scene" not in low:
-        base_raw += ", single scene"
-    if "no collage" not in low:
-        base_raw += ", no collage"
-    if "no text" not in low:
-        base_raw += ", no text"
-    if ("square" not in low) and ("1:1" not in low):
-        base_raw += ", square 1:1"
+    must_rules = [
+        "single scene",
+        "no collage",
+        "no text",
+        "no watermark",
+        "no logos",
+        "no brand names",
+        "no trademarks",
+        "square 1:1",
+    ]
+    for r in must_rules:
+        if r not in low:
+            base_raw += f", {r}"
 
-    # 스타일 강제
+    # --- 스타일별 프리셋 ---
     if style_mode == "watercolor":
-        style = "watercolor illustration, soft wash, paper texture, gentle edges, airy light"
-    elif style_mode == "photo":
-        style = "photorealistic photo, natural lighting, realistic textures, high detail, DSLR look"
-    else:
-        style = f"style hint: {style_mode}"
+        wc_presets = [
+            "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
+            "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
+            "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
+        ]
+        style = rng.choice(wc_presets)
 
+        hero_comp = [
+            "centered subject, minimal background, plenty of negative space, calm composition",
+            "iconic main object, simple props, soft morning light, clean framing",
+        ]
+        body_comp = [
+            "different angle from hero, include secondary elements, natural indoor scene, balanced spacing",
+            "wider view, gentle perspective change, subtle storytelling props",
+        ]
+        comp = rng.choice(hero_comp if variant == "hero" else body_comp)
+
+        extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
+        return f"{base_raw}, {style}, {comp}, {extra}"
+
+    if style_mode == "photo":
+        # ✅ 쿠팡용 “제품 실사 강화”
+        # hero: 이커머스 메인 제품컷 / body: 사용 장면(라이프스타일), 손만(얼굴 X)
+        product_hero = [
+            "photorealistic e-commerce product photography, clean white or light neutral background, softbox studio lighting, natural shadow, ultra sharp, high detail, 85mm lens look, centered",
+            "photorealistic product shot on minimal tabletop, studio lighting, clean background, crisp edges, high resolution, professional catalog photo",
+        ]
+        product_body = [
+            "photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using the item (no face), realistic textures, 35mm lens look, candid but clean",
+            "photorealistic usage scene, close-up hands demonstrating the item, shallow depth of field, natural indoor light, clean modern home, no people faces",
+        ]
+        style = rng.choice(product_hero if variant == "hero" else product_body)
+
+        # 구도/안전 보강
+        hero_comp = [
+            "front view, centered, minimal props, premium clean look",
+            "slight top-down angle, catalog composition, product clearly visible",
+        ]
+        body_comp = [
+            "different angle from hero, show real use-case, include subtle context objects",
+            "close-up detail + action, show how it works, keep background uncluttered",
+        ]
+        comp = rng.choice(hero_comp if variant == "hero" else body_comp)
+
+        extra = "title-safe area on lower third (keep product away from bottom text area)" if variant == "hero" else "avoid looking similar to hero"
+        return f"{base_raw}, {style}, {comp}, {extra}"
+
+    # --- 학습/기타 스타일 (약하게 힌트만) ---
+    comp_pool_hero = [
+        "centered subject, simple background, soft daylight, clean composition",
+        "iconic main object, calm mood, minimal props, negative space",
+    ]
+    comp_pool_body = [
+        "different angle, wider shot, secondary elements, clean framing",
+        "off-center composition, detail emphasis, different perspective",
+    ]
+    comp = rng.choice(comp_pool_hero if variant == "hero" else comp_pool_body)
     extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
-
-    return f"{base_raw}, {style}, {comp}, {extra}"
+    return f"{base_raw}, style hint: {style_mode}, {comp}, {extra}"
 
 
 def run() -> None:
@@ -177,27 +210,21 @@ def run() -> None:
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
 
-    # 프로젝트 구조 유지:
-    # - ai_gemini_image 내부가 OpenAI 이미지 래퍼면 OPENAI 키 사용
-    # - 진짜 Gemini면 GOOGLE_API_KEY를 쓰도록 IMAGE_API_KEY로 오버라이드 가능
+    # 이미지 키: 프로젝트 구조 유지
     img_key = os.getenv("IMAGE_API_KEY", "").strip() or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
 
     state = load_state()
-
-    # ✅ 클릭 로그 반영
     state = ingest_click_log(state, S.WP_URL)
-    # ✅ post_metrics 기반 업데이트(있으면)
     state = try_update_from_post_metrics(state)
 
     history = state.get("history", [])
 
-    # 0) 가드레일 (자동발행 우선이면 초과 시에도 죽지 않게)
+    # 0) 가드레일 (자동발행 우선이면 초과해도 계속)
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
     )
-
     allow_over_budget = bool(int(os.getenv("ALLOW_OVER_BUDGET", str(getattr(S, "ALLOW_OVER_BUDGET", 1)))))
     if allow_over_budget:
         try:
@@ -207,26 +234,25 @@ def run() -> None:
     else:
         check_limits_or_raise(state, cfg)
 
-    # 1) 키워드 선정
+    # 1) 키워드
     keyword, _ = pick_keyword_by_naver(
         S.NAVER_CLIENT_ID,
         S.NAVER_CLIENT_SECRET,
         history,
     )
 
-    # 2) 주제 분기
+    # 2) 주제
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
-    # ✅ 생활 주제면 하위주제 선택(성과 기반)
+    # 생활 하위주제
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
 
-    # ✅ 이번 회차 우선순위
     best_image_style, thumb_variant, _ = pick_best_publishing_combo(state, topic=topic)
 
     # 3) 글 생성 + 품질
@@ -250,18 +276,15 @@ def run() -> None:
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
-    # ✅ 제목에서 연령대 문구 제거(기본 ON)
-    remove_age_in_title = bool(int(os.getenv("REMOVE_AGE_IN_TITLE", "1")))
-    if remove_age_in_title:
+    # 제목에서 연령대 제거(기본 ON)
+    if bool(int(os.getenv("REMOVE_AGE_IN_TITLE", "1"))):
         post["title"] = _sanitize_title_remove_age(post.get("title", ""))
 
-    # 4) 썸네일 타이틀
+    # 4) 썸 타이틀
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
 
-    # ------------------------------------------------------------
-    # ✅ 쿠팡 '삽입 예정' 여부를 이미지 생성 전에 먼저 판단
-    # ------------------------------------------------------------
+    # ✅ 쿠팡 “삽입 예정”을 이미지 생성 전에 판단
     coupang_planned = False
     coupang_reason = ""
     if topic == "life":
@@ -276,12 +299,7 @@ def run() -> None:
         else:
             coupang_planned = bool(r)
 
-    # ------------------------------------------------------------
-    # ✅ 주제별 이미지 스타일 강제 룰
-    #   - health/trend => watercolor
-    #   - life + coupang_planned => photo
-    #   - else => learned style
-    # ------------------------------------------------------------
+    # ✅ 주제별 스타일 강제
     forced_style_mode = ""
     if topic in ("health", "trend"):
         forced_style_mode = "watercolor"
@@ -290,14 +308,23 @@ def run() -> None:
 
     learned_style = best_image_style or pick_image_style(state, topic=topic)
     style_mode = forced_style_mode or learned_style
-    image_style_for_stats = forced_style_mode or learned_style  # 통계 기록용
+    image_style_for_stats = forced_style_mode or learned_style
 
     print("🎨 style_mode:", style_mode, "| forced:", bool(forced_style_mode), "| learned:", learned_style)
     if topic == "life":
         print("🛒 coupang_planned:", coupang_planned, "| reason:", coupang_reason)
 
-    # 5) 이미지 생성
-    base_prompt = post.get("img_prompt") or f"{keyword} blog illustration, single scene, no collage, no text, square 1:1"
+    # 5) 이미지 프롬프트 (✅ 쿠팡일 때 “제품 실사 전용 베이스 프롬프트”로 오버라이드)
+    if topic == "life" and coupang_planned:
+        # keyword는 이미 (키워드 + 하위주제)로 확장돼있으니, 제품 맥락을 강하게 부여
+        subject = keyword.strip()
+        base_prompt = (
+            f"{subject} 관련 생활용품, practical household item, "
+            f"product clearly visible, simple clean background, "
+            f"no packaging text, no labels"
+        )
+    else:
+        base_prompt = post.get("img_prompt") or f"{keyword} blog illustration"
 
     seed = _stable_seed_int(keyword, post.get("title", ""), str(int(time.time())))
     hero_prompt = _build_image_prompt(base_prompt, variant="hero", seed=seed, style_mode=style_mode)
@@ -329,7 +356,7 @@ def run() -> None:
         body_img, make_ascii_filename("body")
     )
 
-    # 7) HTML 생성
+    # 7) HTML
     html = format_post_v2(
         title=post["title"],
         keyword=keyword,
@@ -343,11 +370,10 @@ def run() -> None:
         outro=post.get("outro"),
     )
 
-    # ✅ 쿠팡은 life + coupang_planned일 때만
+    # 쿠팡은 life + coupang_planned일 때만
     coupang_inserted = False
     if topic == "life" and coupang_planned:
         html = inject_coupang(html, keyword=keyword)
-        # 최상단 대가성 문구(쿠팡이 실제로 들어간 글에만)
         html = html.replace(
             '<div class="wrap">',
             '<div class="wrap">\n<div class="disclosure">이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.</div>',
@@ -356,7 +382,7 @@ def run() -> None:
         state = increment_coupang_count(state)
         coupang_inserted = True
 
-    # ✅ 애드센스는 전 글 공통
+    # 애드센스 공통
     html = inject_adsense_slots(html)
     post["content_html"] = html
 
