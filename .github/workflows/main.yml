@@ -2,12 +2,18 @@ name: Auto WordPress Post
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 아침 9시(한국 시간)
+    # 🇰🇷 KST 10:00
+    - cron: '0 1 * * *'
+    # 🇰🇷 KST 14:00
+    - cron: '0 5 * * *'
+    # 🇰🇷 KST 19:00
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ state.json 캐시: "고정 key" + "restore-keys"로 이어달리기
+      # ✅ state.json 이어달리기 캐시
       - name: Restore state cache
         uses: actions/cache@v4
         with:
@@ -42,8 +48,6 @@ jobs:
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # GOOGLE_API_KEY는 이제 안 쓰면 삭제해도 됩니다(남겨도 무방)
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           WP_URL: ${{ secrets.WP_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
@@ -57,7 +61,7 @@ jobs:
           path: preview/*.html
           if-no-files-found: warn
 
-      # ✅ state.json 저장도 동일 key로(다음 실행에서 이어짐)
+      # ✅ 실행 결과 state 저장 (다음 실행에서 사용)
       - name: Save state cache
         if: always()
         uses: actions/cache@v4
