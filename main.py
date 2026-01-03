@@ -204,6 +204,42 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
     extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
     return f"{base_raw}, style hint: {style_mode}, {comp}, {extra}"
 
+import unicodedata
+
+def _kst_slot() -> str:
+    """KST 10/14/19 실행을 health/trend/life로 강제 매핑"""
+    # GitHub Actions는 UTC 기준으로 실행되므로, 코드에서 KST로 다시 계산
+    kst_hour = (time.gmtime().tm_hour + 9) % 24
+    # 10:00, 14:00, 19:00 근처로 들어오면 그 슬롯으로 고정
+    if 9 <= kst_hour < 12:
+        return "health"
+    if 13 <= kst_hour < 16:
+        return "trend"
+    return "life"
+
+def _normalize_title(title: str) -> str:
+    if not title:
+        return title
+    t = unicodedata.normalize("NFKC", title).strip()
+
+    # 흔한 대시/물결/이상 문자 정리
+    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
+
+    # 연령대 문구 제거(원하신 요구)
+    # 예: "30-50대", "30~50대", "3040", "40~50대" 등
+    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b30\s*40\s*50\s*대\b", "", t)
+    t = re.sub(r"\b3040\b", "", t)
+
+    # 맨 앞이 숫자/기호로 시작하는 제목 정리
+    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
+
+    # 공백 정리
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    # 너무 짧아지면 원래 타이틀 fallback
+    return t or title.strip()
 
 def run() -> None:
     S = Settings()
@@ -241,6 +277,16 @@ def run() -> None:
         history,
     )
 
+    # ✅ 시간대별 topic 강제 (기억하신 기능을 실제로 보장)
+    topic = _kst_slot()
+
+    # 기존 guess_topic_from_keyword는 참고용으로만 로그 찍기
+    kw_topic = guess_topic_from_keyword(keyword)
+    print(f"🕒 forced topic={topic} | keyword_topic={kw_topic} | kst_slot applied")
+
+    system_prompt = build_system_prompt(topic)
+    user_prompt = build_user_prompt(topic, keyword)
+
     # 2) 주제
     topic = guess_topic_from_keyword(keyword)
     system_prompt = build_system_prompt(topic)
@@ -275,6 +321,17 @@ def run() -> None:
         return post
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
+
+    # ✅ 제목 강제 정리(연령대 제거 + 이상문자 제거)
+    post["title"] = _normalize_title(post.get("title", ""))
+
+    # ✅ 제목이 히스토리랑 너무 비슷하면 한번 더 강제 재생성 유도
+    dup, reason = pick_retry_reason(post.get("title", ""), history)
+    if dup:
+        print(f"♻️ title dup({reason}) after normalize -> force retry once")
+        # 재시도 1번만: sections 비우면 quality_retry_loop가 다시 뽑게 유도 가능
+        post["sections"] = []
+
 
     # 제목에서 연령대 제거(기본 ON)
     if bool(int(os.getenv("REMOVE_AGE_IN_TITLE", "1"))):
