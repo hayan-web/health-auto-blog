@@ -10,7 +10,6 @@ def _env(k: str, d: str = "") -> str:
     return (os.getenv(k) or d).strip()
 
 def _signed_date() -> str:
-    # Coupang CEA 서명에서 흔히 쓰는 형식(UTC)
     return datetime.now(timezone.utc).strftime("%y%m%dT%H%M%SZ")
 
 def _signature(secret_key: str, message: str) -> str:
@@ -26,25 +25,23 @@ def _cea_auth_header(method: str, path_with_query: str) -> str:
     message = f"{signed_date}{method.upper()}{path_with_query}"
     sig = _signature(secret_key, message)
 
-    # 가장 흔한 CEA 포맷
+    # 흔히 쓰이는 CEA 포맷
     return f"CEA algorithm=HmacSHA256, access-key={access_key}, signed-date={signed_date}, signature={sig}"
 
-def search_products(keyword: str, *, limit: int = 6) -> list[dict]:
+def search_products(keyword: str, *, limit: int = 8, sub_id: str = "") -> list[dict]:
     """
-    키워드로 쿠팡 파트너스 상품검색 후 상위 N개 반환.
-    반환 dict keys(최대한 공통): name, price, url, image, isRocket, rating, reviews
+    키워드로 쿠팡 파트너스 상품검색 후 상위 N개 반환
+    반환 keys: id, name, price, url, image, isRocket, rating, reviews
     """
     kw = (keyword or "").strip()
     if not kw:
         return []
 
-    sub_id = _env("COUPANG_SUB_ID")
     if not sub_id:
-        # 키워드 기반으로 매번 다르게(하지만 너무 길지 않게) subId 자동 생성
+        sub_id = _env("COUPANG_SUB_ID")
+    if not sub_id:
         sub_id = hashlib.sha1(kw.encode("utf-8")).hexdigest()[:12]
 
-    # endpoint(가장 널리 쓰이는 v1)
-    # /v2/providers/affiliate_open_api/apis/openapi/v1/products/search?keyword=...&limit=...&subId=...
     q = f"keyword={quote(kw)}&limit={int(limit)}&subId={quote(sub_id)}"
     path = f"/v2/providers/affiliate_open_api/apis/openapi/v1/products/search?{q}"
     url = f"https://api-gateway.coupang.com{path}"
@@ -56,27 +53,31 @@ def search_products(keyword: str, *, limit: int = 6) -> list[dict]:
 
     r = requests.get(url, headers=headers, timeout=15)
     if r.status_code != 200:
-        # 로그에 남기기 좋게 본문 일부 포함
         raise RuntimeError(f"Coupang API error {r.status_code}: {r.text[:500]}")
 
     data = r.json() or {}
-    products = (data.get("data") or {}).get("productData") or (data.get("data") or {}).get("products") or []
+    raw = (data.get("data") or {})
 
+    products = raw.get("productData") or raw.get("products") or []
     out: list[dict] = []
+
     for p in products[: int(limit)]:
+        pid = p.get("productId") or p.get("id") or ""
         name = (p.get("productName") or p.get("name") or "").strip()
-        if not name:
+        url = (p.get("productUrl") or p.get("url") or "").strip()
+
+        if not name or not url:
             continue
+
         out.append({
+            "id": str(pid) if pid else "",
             "name": name,
             "price": p.get("productPrice") or p.get("price") or "",
-            "url": p.get("productUrl") or p.get("url") or "",
+            "url": url,
             "image": p.get("productImage") or p.get("imageUrl") or p.get("image") or "",
             "isRocket": bool(p.get("isRocket") or p.get("rocket") or False),
             "rating": p.get("ratingAverage") or p.get("rating") or "",
             "reviews": p.get("reviewCount") or p.get("reviews") or "",
         })
 
-    # url 없는 항목 제거
-    out = [x for x in out if x.get("url")]
     return out
