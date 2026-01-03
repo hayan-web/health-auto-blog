@@ -6,6 +6,8 @@ import uuid
 import random
 import hashlib
 import time
+import unicodedata
+from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.ai_openai import (
@@ -42,7 +44,7 @@ from app.image_stats import (
 from app.image_style_picker import pick_image_style
 
 from app.quality_gate import quality_retry_loop
-from app.prompt_router import guess_topic_from_keyword, build_system_prompt, build_user_prompt
+from app.prompt_router import build_system_prompt, build_user_prompt
 from app.guardrails import GuardConfig, check_limits_or_raise, increment_post_count
 
 from app.thumb_title_stats import (
@@ -60,6 +62,21 @@ from app.life_subtopic_stats import (
 )
 
 S = Settings()
+
+
+# -----------------------------
+# Utils
+# -----------------------------
+KST = timezone(timedelta(hours=9))
+
+
+def _kst_now() -> datetime:
+    return datetime.now(tz=KST)
+
+
+def _kst_date_key(dt: datetime | None = None) -> str:
+    d = dt or _kst_now()
+    return d.strftime("%Y-%m-%d")
 
 
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
@@ -87,6 +104,7 @@ def _fallback_png_bytes(text: str) -> bytes:
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
 
         from io import BytesIO
+
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
@@ -104,27 +122,110 @@ def _stable_seed_int(*parts: str) -> int:
     return int(h[:8], 16)
 
 
-def _sanitize_title_remove_age(title: str) -> str:
+def _normalize_title(title: str) -> str:
+    """
+    - 유니코드 정규화
+    - 이상한 대시/물결 정리
+    - 연령대/세대 문구 제거 (30~50대, 30-50대, 3040 등)
+    - 맨 앞 숫자/기호 제거
+    """
     if not title:
         return title
-    t = title
-    t = re.sub(r"\b\d{2}\s*[~-]\s*\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
-    t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용|을 위한|를 위한)?\b", "", t)
+
+    t = unicodedata.normalize("NFKC", str(title)).strip()
+    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
+
+    # 연령대/세대 문구 제거
+    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b30\s*40\s*50\s*대\b", "", t)
+    t = re.sub(r"\b3040\b", "", t)
+
+    # 앞쪽 숫자/기호 제거
+    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
     t = re.sub(r"\s{2,}", " ", t).strip()
-    t = re.sub(r"^[\-\:\|\·\s]+", "", t).strip()
-    return t
+
+    return t or str(title).strip()
+
+
+def _slot_topic_kst(dt: datetime | None = None) -> str:
+    """
+    KST 기준:
+      - 10시대: health
+      - 14시대: trend
+      - 19시대(나머지): life
+    """
+    d = dt or _kst_now()
+    h = d.hour
+    if 9 <= h < 12:
+        return "health"
+    if 13 <= h < 16:
+        return "trend"
+    return "life"
+
+
+def _topics_used_today(state: dict) -> set[str]:
+    """
+    history에 kst_date가 저장돼 있으면 그걸 사용.
+    없으면 최신 3개 정도만 대충 보고 유추(안전 fallback).
+    """
+    today = _kst_date_key()
+    used: set[str] = set()
+    hist = (state or {}).get("history") or []
+    if not isinstance(hist, list):
+        return used
+
+    # 1) 정석: kst_date 기반
+    for it in reversed(hist[-50:]):
+        if not isinstance(it, dict):
+            continue
+        if it.get("kst_date") == today and it.get("topic"):
+            used.add(str(it.get("topic")))
+    if used:
+        return used
+
+    # 2) fallback: 오늘 필드가 없으면 “최근 3회 발행 topic”만 보고 중복 회피
+    for it in reversed(hist[-3:]):
+        if isinstance(it, dict) and it.get("topic"):
+            used.add(str(it.get("topic")))
+    return used
+
+
+def _choose_topic_with_rotation(state: dict, forced: str) -> str:
+    """
+    forced(시간대 topic)를 기본으로 하되,
+    같은 날 이미 그 topic이 발행됐으면 다음 topic으로 로테이션.
+    """
+    order = ["health", "trend", "life"]
+    used = _topics_used_today(state)
+
+    if forced not in order:
+        forced = "life"
+
+    # forced가 아직 안 나갔으면 그대로
+    if forced not in used:
+        return forced
+
+    # 이미 나갔으면 다음 순서에서 안 쓴 걸 선택
+    start = order.index(forced)
+    for i in range(1, len(order) + 1):
+        cand = order[(start + i) % len(order)]
+        if cand not in used:
+            return cand
+
+    # 전부 나갔으면 forced 유지 (하루 3회 이상일 때)
+    return forced
 
 
 def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) -> str:
     """
     style_mode:
-      - "watercolor" : 수채화
-      - "photo"      : 실사/제품컷/라이프스타일 사진(쿠팡)
+      - "watercolor" : 건강/트렌드용 수채화
+      - "photo"      : 쿠팡(생활)용 실사 제품/사용컷
       - 그 외        : 학습 스타일 문자열(약하게 힌트)
     """
     rng = random.Random(seed + (1 if variant == "hero" else 2))
 
-    # --- 공통 금지/품질 규칙 (강화) ---
     base_raw = (base or "").strip()
     low = base_raw.lower()
 
@@ -142,7 +243,6 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
         if r not in low:
             base_raw += f", {r}"
 
-    # --- 스타일별 프리셋 ---
     if style_mode == "watercolor":
         wc_presets = [
             "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
@@ -150,7 +250,6 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
         ]
         style = rng.choice(wc_presets)
-
         hero_comp = [
             "centered subject, minimal background, plenty of negative space, calm composition",
             "iconic main object, simple props, soft morning light, clean framing",
@@ -160,24 +259,20 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             "wider view, gentle perspective change, subtle storytelling props",
         ]
         comp = rng.choice(hero_comp if variant == "hero" else body_comp)
-
         extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
         return f"{base_raw}, {style}, {comp}, {extra}"
 
     if style_mode == "photo":
-        # ✅ 쿠팡용 “제품 실사 강화”
-        # hero: 이커머스 메인 제품컷 / body: 사용 장면(라이프스타일), 손만(얼굴 X)
         product_hero = [
-            "photorealistic e-commerce product photography, clean white or light neutral background, softbox studio lighting, natural shadow, ultra sharp, high detail, 85mm lens look, centered",
+            "photorealistic e-commerce product photography, clean white or light neutral background, softbox studio lighting, natural shadow, ultra sharp, high detail, centered",
             "photorealistic product shot on minimal tabletop, studio lighting, clean background, crisp edges, high resolution, professional catalog photo",
         ]
         product_body = [
-            "photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using the item (no face), realistic textures, 35mm lens look, candid but clean",
-            "photorealistic usage scene, close-up hands demonstrating the item, shallow depth of field, natural indoor light, clean modern home, no people faces",
+            "photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using the item (no face), realistic textures, clean modern home",
+            "photorealistic usage scene, close-up hands demonstrating the item, shallow depth of field, natural indoor light, uncluttered background, no faces",
         ]
         style = rng.choice(product_hero if variant == "hero" else product_body)
 
-        # 구도/안전 보강
         hero_comp = [
             "front view, centered, minimal props, premium clean look",
             "slight top-down angle, catalog composition, product clearly visible",
@@ -188,10 +283,9 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
         ]
         comp = rng.choice(hero_comp if variant == "hero" else body_comp)
 
-        extra = "title-safe area on lower third (keep product away from bottom text area)" if variant == "hero" else "avoid looking similar to hero"
+        extra = "title-safe area on lower third (keep product away from bottom)" if variant == "hero" else "avoid looking similar to hero"
         return f"{base_raw}, {style}, {comp}, {extra}"
 
-    # --- 학습/기타 스타일 (약하게 힌트만) ---
     comp_pool_hero = [
         "centered subject, simple background, soft daylight, clean composition",
         "iconic main object, calm mood, minimal props, negative space",
@@ -204,49 +298,16 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
     extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
     return f"{base_raw}, style hint: {style_mode}, {comp}, {extra}"
 
-import unicodedata
 
-def _kst_slot() -> str:
-    """KST 10/14/19 실행을 health/trend/life로 강제 매핑"""
-    # GitHub Actions는 UTC 기준으로 실행되므로, 코드에서 KST로 다시 계산
-    kst_hour = (time.gmtime().tm_hour + 9) % 24
-    # 10:00, 14:00, 19:00 근처로 들어오면 그 슬롯으로 고정
-    if 9 <= kst_hour < 12:
-        return "health"
-    if 13 <= kst_hour < 16:
-        return "trend"
-    return "life"
-
-def _normalize_title(title: str) -> str:
-    if not title:
-        return title
-    t = unicodedata.normalize("NFKC", title).strip()
-
-    # 흔한 대시/물결/이상 문자 정리
-    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
-
-    # 연령대 문구 제거(원하신 요구)
-    # 예: "30-50대", "30~50대", "3040", "40~50대" 등
-    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대\b", "", t)
-    t = re.sub(r"\b\d{2}\s*대\b", "", t)
-    t = re.sub(r"\b30\s*40\s*50\s*대\b", "", t)
-    t = re.sub(r"\b3040\b", "", t)
-
-    # 맨 앞이 숫자/기호로 시작하는 제목 정리
-    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
-
-    # 공백 정리
-    t = re.sub(r"\s{2,}", " ", t).strip()
-
-    # 너무 짧아지면 원래 타이틀 fallback
-    return t or title.strip()
-
+# -----------------------------
+# Main
+# -----------------------------
 def run() -> None:
     S = Settings()
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
 
-    # 이미지 키: 프로젝트 구조 유지
+    # 이미지 키: 프로젝트 구조 유지 (내부가 OpenAI 래퍼든, 다른 래퍼든 여기만 바꾸면 됨)
     img_key = os.getenv("IMAGE_API_KEY", "").strip() or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
 
@@ -277,28 +338,24 @@ def run() -> None:
         history,
     )
 
-    # ✅ 시간대별 topic 강제 (기억하신 기능을 실제로 보장)
-    topic = _kst_slot()
-
-    # 기존 guess_topic_from_keyword는 참고용으로만 로그 찍기
-    kw_topic = guess_topic_from_keyword(keyword)
-    print(f"🕒 forced topic={topic} | keyword_topic={kw_topic} | kst_slot applied")
+    # ✅ 시간대별 topic 강제 + 같은날 중복이면 로테이션
+    forced = _slot_topic_kst()
+    topic = _choose_topic_with_rotation(state, forced)
+    print(f"🕒 forced={forced} -> chosen={topic} | used_today={sorted(list(_topics_used_today(state)))}")
 
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
-    # 2) 주제
-    topic = guess_topic_from_keyword(keyword)
-    system_prompt = build_system_prompt(topic)
-    user_prompt = build_user_prompt(topic, keyword)
-
-    # 생활 하위주제
+    # ✅ 생활(life)만 하위주제 추가 (원래 설계 유지)
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
+        # life_subtopic 붙였으면 user_prompt도 갱신(안전)
+        user_prompt = build_user_prompt(topic, keyword)
 
+    # 2) (학습) 이미지/썸네일 우선 조합
     best_image_style, thumb_variant, _ = pick_best_publishing_combo(state, topic=topic)
 
     # 3) 글 생성 + 품질
@@ -314,6 +371,9 @@ def run() -> None:
         except TypeError:
             post = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
 
+        # ✅ 제목 정리 먼저 적용(중복 판단 정확도 상승)
+        post["title"] = _normalize_title(post.get("title", ""))
+
         dup, reason = pick_retry_reason(post.get("title", ""), history)
         if dup:
             post["sections"] = []
@@ -322,26 +382,20 @@ def run() -> None:
 
     post, _ = quality_retry_loop(_gen, max_retry=3)
 
-    # ✅ 제목 강제 정리(연령대 제거 + 이상문자 제거)
+    # ✅ 최종 제목 정리 한번 더(안전)
     post["title"] = _normalize_title(post.get("title", ""))
 
-    # ✅ 제목이 히스토리랑 너무 비슷하면 한번 더 강제 재생성 유도
+    # ✅ 정리 후에도 중복이면 “한 번만” 더 흔들기 (섹션 비우기)
     dup, reason = pick_retry_reason(post.get("title", ""), history)
     if dup:
         print(f"♻️ title dup({reason}) after normalize -> force retry once")
-        # 재시도 1번만: sections 비우면 quality_retry_loop가 다시 뽑게 유도 가능
         post["sections"] = []
 
-
-    # 제목에서 연령대 제거(기본 ON)
-    if bool(int(os.getenv("REMOVE_AGE_IN_TITLE", "1"))):
-        post["title"] = _sanitize_title_remove_age(post.get("title", ""))
-
-    # 4) 썸 타이틀
+    # 4) 썸네일 타이틀
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
 
-    # ✅ 쿠팡 “삽입 예정”을 이미지 생성 전에 판단
+    # 5) ✅ 쿠팡 “계획 여부”를 이미지 생성 전에 판단 (life에서만)
     coupang_planned = False
     coupang_reason = ""
     if topic == "life":
@@ -356,7 +410,10 @@ def run() -> None:
         else:
             coupang_planned = bool(r)
 
-    # ✅ 주제별 스타일 강제
+    # ✅ 주제별 이미지 스타일 강제
+    # - 건강/트렌드: 수채화
+    # - 쿠팡(생활+쿠팡): 실사
+    # - 생활(쿠팡 아님): 학습 스타일(또는 picker)
     forced_style_mode = ""
     if topic in ("health", "trend"):
         forced_style_mode = "watercolor"
@@ -371,13 +428,12 @@ def run() -> None:
     if topic == "life":
         print("🛒 coupang_planned:", coupang_planned, "| reason:", coupang_reason)
 
-    # 5) 이미지 프롬프트 (✅ 쿠팡일 때 “제품 실사 전용 베이스 프롬프트”로 오버라이드)
+    # 6) 이미지 프롬프트
     if topic == "life" and coupang_planned:
-        # keyword는 이미 (키워드 + 하위주제)로 확장돼있으니, 제품 맥락을 강하게 부여
         subject = keyword.strip()
         base_prompt = (
-            f"{subject} 관련 생활용품, practical household item, "
-            f"product clearly visible, simple clean background, "
+            f"{subject} related household item, practical home product, "
+            f"product clearly visible, clean minimal background, "
             f"no packaging text, no labels"
         )
     else:
@@ -403,17 +459,23 @@ def run() -> None:
     body_img = to_square_1024(body_img)
     hero_img_titled = to_square_1024(add_title_to_image(hero_img, thumb_title))
 
-    # 6) 업로드
+    # 7) 업로드
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        hero_img_titled, make_ascii_filename("featured")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        hero_img_titled,
+        make_ascii_filename("featured"),
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        body_img, make_ascii_filename("body")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        body_img,
+        make_ascii_filename("body"),
     )
 
-    # 7) HTML
+    # 8) HTML
     html = format_post_v2(
         title=post["title"],
         keyword=keyword,
@@ -427,7 +489,6 @@ def run() -> None:
         outro=post.get("outro"),
     )
 
-    # 쿠팡은 life + coupang_planned일 때만
     coupang_inserted = False
     if topic == "life" and coupang_planned:
         html = inject_coupang(html, keyword=keyword)
@@ -439,18 +500,22 @@ def run() -> None:
         state = increment_coupang_count(state)
         coupang_inserted = True
 
-    # 애드센스 공통
+    # ✅ 애드센스 슬롯 삽입(글 전체 공통)
     html = inject_adsense_slots(html)
     post["content_html"] = html
 
-    # 8) 발행
+    # 9) 발행
     post_id = publish_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        post, hero_url, body_url,
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        post,
+        hero_url,
+        body_url,
         featured_media_id=hero_media_id,
     )
 
-    # 9) 통계/학습
+    # 10) 통계/학습
     state = record_image_impression(state, image_style_for_stats)
     state = update_image_score(state, image_style_for_stats)
     state = record_topic_style_impression(state, topic, image_style_for_stats)
@@ -473,6 +538,7 @@ def run() -> None:
     )
     state = apply_cooldown_rules(state, topic=topic, img=image_style_for_stats, tv=thumb_variant, rule=rule)
 
+    # ✅ history에 오늘 날짜/슬롯 저장 (로테이션이 확실히 동작하도록)
     state = add_history_item(
         state,
         {
@@ -486,11 +552,17 @@ def run() -> None:
             "life_subtopic": life_subtopic,
             "coupang_planned": coupang_planned,
             "coupang_inserted": coupang_inserted,
+            "kst_date": _kst_date_key(),
+            "kst_hour": _kst_now().hour,
+            "forced_slot": forced,
         },
     )
     save_state(state)
 
-    print(f"✅ 발행 완료: post_id={post_id} | topic={topic} | sub={life_subtopic} | coupang={coupang_inserted} | img_style={image_style_for_stats}")
+    print(
+        f"✅ 발행 완료: post_id={post_id} | topic={topic} | forced={forced} | sub={life_subtopic} "
+        f"| coupang={coupang_inserted} | img_style={image_style_for_stats}"
+    )
 
 
 if __name__ == "__main__":
