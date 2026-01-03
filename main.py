@@ -80,6 +80,113 @@ def _as_html(x):
         return x[0]
     return x
 
+def _extract_first_coupang_url(html: str) -> str:
+    """
+    inject_coupang가 넣어준 쿠팡 링크가 있으면 첫 URL만 뽑습니다.
+    - coupang.com / coupang.co.kr / link.coupang.com 등 대응
+    """
+    if not html:
+        return ""
+    # href="..."
+    m = re.search(r'href=["\'](https?://[^"\']*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com)[^"\']*)["\']', html, re.I)
+    if m:
+        return m.group(1)
+    # 그냥 텍스트로 들어간 URL
+    m = re.search(r'(https?://\S*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com)\S*)', html, re.I)
+    if m:
+        return m.group(1).rstrip(').,<>"]\'')
+    return ""
+
+
+def _render_coupang_cta(url: str, *, title: str = "", variant: str = "top") -> str:
+    """
+    정책적으로 안전한 '확인'형 CTA
+    variant: top | mid | bottom (문구/강조만 다르게)
+    """
+    if not url:
+        return ""
+
+    if variant == "top":
+        headline = "🔥 쿠팡에서 가격/쿠폰 적용 확인"
+        sub = "로켓배송·쿠폰은 시점에 따라 달라질 수 있어요."
+        btn = "쿠팡에서 가격 보기"
+    elif variant == "mid":
+        headline = "✅ 지금 조건(쿠폰/배송) 확인"
+        sub = "옵션별 가격이 달라질 수 있어요."
+        btn = "할인/옵션 확인하기"
+    else:
+        headline = "🚚 구매 전 마지막 체크"
+        sub = "최종 가격·배송 조건을 한 번 더 확인하세요."
+        btn = "최저가/배송 확인하기"
+
+    # 테마가 스타일을 지우더라도 최소한 버튼처럼 보이게 inline style 사용
+    return f"""
+<div class="coupang-cta" style="border:1px solid #e5e7eb;border-radius:12px;padding:14px 14px;margin:14px 0;background:#fff;">
+  <div style="font-weight:700;font-size:16px;line-height:1.2;margin-bottom:6px;">{headline}</div>
+  <div style="color:#6b7280;font-size:13px;line-height:1.3;margin-bottom:10px;">{sub}</div>
+  <a href="{url}" target="_blank" rel="nofollow sponsored noopener"
+     style="display:block;text-align:center;padding:12px 14px;border-radius:10px;
+            background:#111827;color:#fff;text-decoration:none;font-weight:700;">
+    {btn} →
+  </a>
+</div>
+""".strip()
+
+
+def _insert_after_first_summary(html: str, block: str) -> str:
+    """
+    요약 박스(1분 요약) 뒤에 넣고 싶지만 테마별 구조가 달라서,
+    우선적으로 첫 번째 <ul> 다음, 없으면 본문 맨 앞에 삽입합니다.
+    """
+    if not block:
+        return html
+    if not html:
+        return block
+
+    # 첫 <ul> 뒤
+    idx = html.find("</ul>")
+    if idx != -1:
+        return html[: idx + 5] + "\n" + block + "\n" + html[idx + 5 :]
+
+    # fallback: 맨 앞
+    return block + "\n" + html
+
+
+def _insert_near_middle(html: str, block: str) -> str:
+    """
+    중간 삽입: 두 번째 <h2> 앞 or 대략 절반 지점
+    """
+    if not block or not html:
+        return html
+
+    hs = [m.start() for m in re.finditer(r"<h2\b", html, re.I)]
+    if len(hs) >= 2:
+        pos = hs[1]
+        return html[:pos] + block + "\n" + html[pos:]
+
+    # fallback: 절반
+    pos = max(0, len(html) // 2)
+    return html[:pos] + "\n" + block + "\n" + html[pos:]
+
+
+def _insert_before_comments(html: str, block: str) -> str:
+    """
+    댓글 영역 직전(있다면) 또는 맨 끝에 삽입
+    """
+    if not block:
+        return html
+    if not html:
+        return block
+
+    # 워드프레스 댓글 anchor 흔한 패턴
+    for pat in [r'id="comments"', r'class="comments"', r'댓글 남기기']:
+        m = re.search(pat, html, re.I)
+        if m:
+            pos = m.start()
+            return html[:pos] + block + "\n" + html[pos:]
+
+    return html + "\n" + block
+
 
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
@@ -87,7 +194,6 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     if not prefix:
         prefix = "img"
     return f"{prefix}-{uid}.{ext}"
-
 
 def _fallback_png_bytes(text: str) -> bytes:
     try:
@@ -434,18 +540,45 @@ def run() -> None:
 
     # 11) 쿠팡 삽입 (life + planned)
     coupang_inserted = False
-    if topic == "life" and coupang_planned:
-        html = _as_html(inject_coupang(html, keyword=keyword))
+# ✅ 쿠팡은 life + planned일 때만
+coupang_inserted = False
+if topic == "life" and coupang_planned:
+    html2 = _as_html(inject_coupang(html, keyword=keyword))
 
+    # inject_coupang가 성공했는지 URL로 검증
+    coupang_url = _extract_first_coupang_url(html2)
+
+    # 1) 성공: 버튼형 CTA 3곳에 강제 삽입
+    if coupang_url:
+        top_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="top")
+        mid_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="mid")
+        bot_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="bottom")
+
+        html2 = _insert_after_first_summary(html2, top_cta)
+        html2 = _insert_near_middle(html2, mid_cta)
+        html2 = _insert_before_comments(html2, bot_cta)
+
+        # 대가성 문구는 최상단에 보이게
         disclosure = (
-            '<div class="disclosure">이 포스팅은 쿠팡 파트너스 활동의 일환으로 '
-            '일정액의 수수료를 제공받을 수 있습니다.</div>'
+            '<div class="disclosure" style="padding:10px 12px;border-radius:10px;background:#fff7ed;'
+            'border:1px solid #fed7aa;color:#9a3412;margin:10px 0;">'
+            '이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.'
+            '</div>'
         )
-
-        if '<div class="wrap">' in html:
-            html = html.replace('<div class="wrap">', f'<div class="wrap">\n{disclosure}', 1)
+        if '<div class="wrap">' in html2:
+            html2 = html2.replace('<div class="wrap">', f'<div class="wrap">\n{disclosure}', 1)
         else:
-            html = f"{disclosure}\n{html}"
+            html2 = disclosure + "\n" + html2
+
+        state = increment_coupang_count(state)
+        coupang_inserted = True
+        html = html2
+        print("🛒 coupang injected: URL found + CTA blocks inserted")
+
+    # 2) 실패: 로그를 남기고, 글은 그대로 진행(대가성 문구도 넣지 않음)
+    else:
+        html = html2
+        print("⚠️ coupang planned BUT no URL found in HTML (inject failed or stripped).")
 
         state = increment_coupang_count(state)
         coupang_inserted = True
