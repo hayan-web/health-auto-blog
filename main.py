@@ -8,6 +8,7 @@ import hashlib
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from typing import Any, Tuple
 
 from app.config import Settings
 from app.ai_openai import (
@@ -35,7 +36,7 @@ from app.coupang_policy import should_inject_coupang, increment_coupang_count
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
-from app.monetize_coupang import inject_coupang
+from app.monetize_coupang import inject_coupang  # 최신: (html, inserted, state) 권장
 
 from app.image_stats import (
     record_impression as record_image_impression,
@@ -65,6 +66,9 @@ S = Settings()
 KST = timezone(timedelta(hours=9))
 
 
+# -----------------------------
+# Time helpers (KST)
+# -----------------------------
 def _kst_now() -> datetime:
     return datetime.now(tz=KST)
 
@@ -74,180 +78,13 @@ def _kst_date_key(dt: datetime | None = None) -> str:
     return d.strftime("%Y-%m-%d")
 
 
-def _as_html(x):
-    """format_post_v2 / inject_* 가 (html, ...) 튜플을 반환하는 케이스 안전 처리"""
-    if isinstance(x, tuple) and x:
-        return x[0]
-    return x
-
-def _extract_first_coupang_url(html: str) -> str:
-    """
-    inject_coupang가 넣어준 쿠팡 링크가 있으면 첫 URL만 뽑습니다.
-    - coupang.com / coupang.co.kr / link.coupang.com 등 대응
-    """
-    if not html:
-        return ""
-    # href="..."
-    m = re.search(r'href=["\'](https?://[^"\']*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com)[^"\']*)["\']', html, re.I)
-    if m:
-        return m.group(1)
-    # 그냥 텍스트로 들어간 URL
-    m = re.search(r'(https?://\S*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com)\S*)', html, re.I)
-    if m:
-        return m.group(1).rstrip(').,<>"]\'')
-    return ""
-
-
-def _render_coupang_cta(url: str, *, title: str = "", variant: str = "top") -> str:
-    """
-    정책적으로 안전한 '확인'형 CTA
-    variant: top | mid | bottom (문구/강조만 다르게)
-    """
-    if not url:
-        return ""
-
-    if variant == "top":
-        headline = "🔥 쿠팡에서 가격/쿠폰 적용 확인"
-        sub = "로켓배송·쿠폰은 시점에 따라 달라질 수 있어요."
-        btn = "쿠팡에서 가격 보기"
-    elif variant == "mid":
-        headline = "✅ 지금 조건(쿠폰/배송) 확인"
-        sub = "옵션별 가격이 달라질 수 있어요."
-        btn = "할인/옵션 확인하기"
-    else:
-        headline = "🚚 구매 전 마지막 체크"
-        sub = "최종 가격·배송 조건을 한 번 더 확인하세요."
-        btn = "최저가/배송 확인하기"
-
-    # 테마가 스타일을 지우더라도 최소한 버튼처럼 보이게 inline style 사용
-    return f"""
-<div class="coupang-cta" style="border:1px solid #e5e7eb;border-radius:12px;padding:14px 14px;margin:14px 0;background:#fff;">
-  <div style="font-weight:700;font-size:16px;line-height:1.2;margin-bottom:6px;">{headline}</div>
-  <div style="color:#6b7280;font-size:13px;line-height:1.3;margin-bottom:10px;">{sub}</div>
-  <a href="{url}" target="_blank" rel="nofollow sponsored noopener"
-     style="display:block;text-align:center;padding:12px 14px;border-radius:10px;
-            background:#111827;color:#fff;text-decoration:none;font-weight:700;">
-    {btn} →
-  </a>
-</div>
-""".strip()
-
-
-def _insert_after_first_summary(html: str, block: str) -> str:
-    """
-    요약 박스(1분 요약) 뒤에 넣고 싶지만 테마별 구조가 달라서,
-    우선적으로 첫 번째 <ul> 다음, 없으면 본문 맨 앞에 삽입합니다.
-    """
-    if not block:
-        return html
-    if not html:
-        return block
-
-    # 첫 <ul> 뒤
-    idx = html.find("</ul>")
-    if idx != -1:
-        return html[: idx + 5] + "\n" + block + "\n" + html[idx + 5 :]
-
-    # fallback: 맨 앞
-    return block + "\n" + html
-
-
-def _insert_near_middle(html: str, block: str) -> str:
-    """
-    중간 삽입: 두 번째 <h2> 앞 or 대략 절반 지점
-    """
-    if not block or not html:
-        return html
-
-    hs = [m.start() for m in re.finditer(r"<h2\b", html, re.I)]
-    if len(hs) >= 2:
-        pos = hs[1]
-        return html[:pos] + block + "\n" + html[pos:]
-
-    # fallback: 절반
-    pos = max(0, len(html) // 2)
-    return html[:pos] + "\n" + block + "\n" + html[pos:]
-
-
-def _insert_before_comments(html: str, block: str) -> str:
-    """
-    댓글 영역 직전(있다면) 또는 맨 끝에 삽입
-    """
-    if not block:
-        return html
-    if not html:
-        return block
-
-    # 워드프레스 댓글 anchor 흔한 패턴
-    for pat in [r'id="comments"', r'class="comments"', r'댓글 남기기']:
-        m = re.search(pat, html, re.I)
-        if m:
-            pos = m.start()
-            return html[:pos] + block + "\n" + html[pos:]
-
-    return html + "\n" + block
-
-
-def make_ascii_filename(prefix: str, ext: str = "png") -> str:
-    uid = uuid.uuid4().hex[:10]
-    prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-")
-    if not prefix:
-        prefix = "img"
-    return f"{prefix}-{uid}.{ext}"
-
-def _fallback_png_bytes(text: str) -> bytes:
-    try:
-        from PIL import Image, ImageDraw, ImageFont  # type: ignore
-
-        img = Image.new("RGB", (1024, 1024), (245, 245, 245))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 48)
-        except Exception:
-            font = ImageFont.load_default()
-
-        msg = (text or "image").strip()[:40]
-        box = draw.textbbox((0, 0), msg, font=font)
-        w, h = box[2] - box[0], box[3] - box[1]
-        draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
-
-        from io import BytesIO
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-
-    except Exception:
-        return base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
-            "ASsJTYQAAAAASUVORK5CYII="
-        )
-
-
-def _stable_seed_int(*parts: str) -> int:
-    s = "|".join([p or "" for p in parts])
-    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
-    return int(h[:8], 16)
-
-
-def _normalize_title(title: str) -> str:
-    if not title:
-        return title
-
-    t = unicodedata.normalize("NFKC", str(title)).strip()
-    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
-
-    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대\b", "", t)
-    t = re.sub(r"\b\d{2}\s*대\b", "", t)
-    t = re.sub(r"\b30\s*40\s*50\s*대\b", "", t)
-    t = re.sub(r"\b3040\b", "", t)
-
-    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
-    t = re.sub(r"\s{2,}", " ", t).strip()
-
-    return t or str(title).strip()
-
-
 def _slot_topic_kst(dt: datetime | None = None) -> str:
+    """
+    KST 기준 슬롯:
+      09~11  -> health
+      13~15  -> trend
+      그 외  -> life
+    """
     d = dt or _kst_now()
     h = d.hour
     if 9 <= h < 12:
@@ -257,14 +94,55 @@ def _slot_topic_kst(dt: datetime | None = None) -> str:
     return "life"
 
 
+# -----------------------------
+# Safe tuple->html coercion
+# -----------------------------
+def _as_html(x: Any) -> str:
+    """
+    format_post_v2 / inject_* 가 (html, ...) 튜플 반환하는 케이스 안전 처리
+    """
+    if isinstance(x, tuple) and x:
+        return str(x[0] or "")
+    return str(x or "")
+
+
+# -----------------------------
+# Title normalizer
+# -----------------------------
+def _normalize_title(title: str) -> str:
+    if not title:
+        return title
+
+    t = unicodedata.normalize("NFKC", str(title)).strip()
+    # 이상 대시/물결/문자 정리
+    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
+
+    # 연령대/숫자 앞머리 제거
+    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b\d{2}\s*대\b", "", t)
+    t = re.sub(r"\b30\s*40\s*50\s*대\b", "", t)
+    t = re.sub(r"\b3040\b", "", t)
+
+    # 맨 앞 숫자/기호 제거
+    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    return t or str(title).strip()
+
+
+# -----------------------------
+# Daily topic rotation
+# -----------------------------
 def _topics_used_today(state: dict) -> set[str]:
     today = _kst_date_key()
     used: set[str] = set()
+
     hist = (state or {}).get("history") or []
     if not isinstance(hist, list):
         return used
 
-    for it in reversed(hist[-50:]):
+    # 같은 날 기록(kst_date)이 있으면 그걸 우선
+    for it in reversed(hist[-80:]):
         if not isinstance(it, dict):
             continue
         if it.get("kst_date") == today and it.get("topic"):
@@ -272,6 +150,7 @@ def _topics_used_today(state: dict) -> set[str]:
     if used:
         return used
 
+    # fallback: 최근 3개
     for it in reversed(hist[-3:]):
         if isinstance(it, dict) and it.get("topic"):
             used.add(str(it.get("topic")))
@@ -279,6 +158,9 @@ def _topics_used_today(state: dict) -> set[str]:
 
 
 def _choose_topic_with_rotation(state: dict, forced: str) -> str:
+    """
+    같은 날 같은 topic이 이미 사용되었으면 다음 topic으로 회전
+    """
     order = ["health", "trend", "life"]
     used = _topics_used_today(state)
 
@@ -297,12 +179,62 @@ def _choose_topic_with_rotation(state: dict, forced: str) -> str:
     return forced
 
 
+# -----------------------------
+# Image helpers
+# -----------------------------
+def make_ascii_filename(prefix: str, ext: str = "png") -> str:
+    uid = uuid.uuid4().hex[:10]
+    prefix = re.sub(r"[^a-zA-Z0-9_-]+", "-", (prefix or "img")).strip("-") or "img"
+    return f"{prefix}-{uid}.{ext}"
+
+
+def _fallback_png_bytes(text: str) -> bytes:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+        from io import BytesIO
+
+        img = Image.new("RGB", (1024, 1024), (245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 48)
+        except Exception:
+            font = ImageFont.load_default()
+
+        msg = (text or "image").strip()[:40]
+        box = draw.textbbox((0, 0), msg, font=font)
+        w, h = box[2] - box[0], box[3] - box[1]
+        draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    except Exception:
+        return base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
+            "ASsJTYQAAAAASUVORK5CYII="
+        )
+
+
+def _stable_seed_int(*parts: str) -> int:
+    s = "|".join([p or "" for p in parts])
+    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+
 def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) -> str:
+    """
+    style_mode:
+      - watercolor : 건강/트렌드 수채화
+      - photo      : 쿠팡(실사 제품/사용컷)
+      - 기타       : 학습 스타일 문자열 (약하게 힌트)
+    """
     rng = random.Random(seed + (1 if variant == "hero" else 2))
 
     base_raw = (base or "").strip()
     low = base_raw.lower()
 
+    # 공통 금지/안전 규칙 강화
     must_rules = [
         "single scene",
         "no collage",
@@ -358,6 +290,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
         extra = "title-safe area on lower third (keep product away from bottom)" if variant == "hero" else "avoid looking similar to hero"
         return f"{base_raw}, {style}, {comp}, {extra}"
 
+    # 기타 스타일 힌트
     comp_pool_hero = [
         "centered subject, simple background, soft daylight, clean composition",
         "iconic main object, calm mood, minimal props, negative space",
@@ -371,20 +304,54 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
     return f"{base_raw}, style hint: {style_mode}, {comp}, {extra}"
 
 
+# -----------------------------
+# Coupang safe wrapper
+# -----------------------------
+def _inject_coupang_safe(html: str, keyword: str, state: dict) -> Tuple[str, bool, dict]:
+    """
+    최신: inject_coupang(html, keyword, state) -> (html, inserted, state)
+    구버전 호환:
+      - inject_coupang(html, keyword=...) -> str 또는 (html, inserted)
+      - inject_coupang(html, keyword=...) -> str
+    """
+    try:
+        # 최신 시그니처 권장
+        out = inject_coupang(html, keyword=keyword, state=state)  # type: ignore
+        if isinstance(out, tuple):
+            if len(out) >= 3:
+                return _as_html(out[0]), bool(out[1]), out[2]
+            if len(out) == 2:
+                return _as_html(out[0]), bool(out[1]), state
+        return _as_html(out), True, state
+    except TypeError:
+        # 구버전 시도
+        out = inject_coupang(html, keyword=keyword)  # type: ignore
+        if isinstance(out, tuple):
+            if len(out) == 2:
+                return _as_html(out[0]), bool(out[1]), state
+            return _as_html(out[0]), True, state
+        return _as_html(out), True, state
+    except Exception as e:
+        print(f"⚠️ inject_coupang failed: {e}")
+        return html, False, state
+
+
 def run() -> None:
     S = Settings()
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
 
+    # 이미지 클라이언트(프로젝트 구조 유지)
     img_key = os.getenv("IMAGE_API_KEY", "").strip() or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
 
+    # state
     state = load_state()
     state = ingest_click_log(state, S.WP_URL)
     state = try_update_from_post_metrics(state)
-
     history = state.get("history", [])
 
+    # 가드레일
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
@@ -408,12 +375,13 @@ def run() -> None:
     # 2) 시간대 topic 강제 + 같은날 중복 방지 로테이션
     forced = _slot_topic_kst()
     topic = _choose_topic_with_rotation(state, forced)
-    print(f"🕒 forced={forced} -> chosen={topic} | used_today={sorted(list(_topics_used_today(state)))}")
+    used_today = sorted(list(_topics_used_today(state)))
+    print(f"🕒 forced={forced} -> chosen={topic} | used_today={used_today}")
 
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword)
 
-    # 3) life 하위주제
+    # 3) life 하위주제(성과 기반)
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
@@ -522,7 +490,7 @@ def run() -> None:
         body_img, make_ascii_filename("body")
     )
 
-    # 10) HTML 생성 (✅ 튜플 반환 안전 처리)
+    # 10) HTML 생성
     html = _as_html(
         format_post_v2(
             title=post["title"],
@@ -538,52 +506,18 @@ def run() -> None:
         )
     )
 
-    # 11) 쿠팡 삽입 (life + planned)
+    # 11) 쿠팡 삽입 (life + planned)  ✅ “진짜 삽입 성공”일 때만 count 증가
     coupang_inserted = False
-# ✅ 쿠팡은 life + planned일 때만
-coupang_inserted = False
-if topic == "life" and coupang_planned:
-    html2 = _as_html(inject_coupang(html, keyword=keyword))
-
-    # inject_coupang가 성공했는지 URL로 검증
-    coupang_url = _extract_first_coupang_url(html2)
-
-    # 1) 성공: 버튼형 CTA 3곳에 강제 삽입
-    if coupang_url:
-        top_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="top")
-        mid_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="mid")
-        bot_cta = _render_coupang_cta(coupang_url, title=post.get("title",""), variant="bottom")
-
-        html2 = _insert_after_first_summary(html2, top_cta)
-        html2 = _insert_near_middle(html2, mid_cta)
-        html2 = _insert_before_comments(html2, bot_cta)
-
-        # 대가성 문구는 최상단에 보이게
-        disclosure = (
-            '<div class="disclosure" style="padding:10px 12px;border-radius:10px;background:#fff7ed;'
-            'border:1px solid #fed7aa;color:#9a3412;margin:10px 0;">'
-            '이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.'
-            '</div>'
-        )
-        if '<div class="wrap">' in html2:
-            html2 = html2.replace('<div class="wrap">', f'<div class="wrap">\n{disclosure}', 1)
+    if topic == "life" and coupang_planned:
+        html, inserted, state = _inject_coupang_safe(html, keyword=keyword, state=state)
+        if inserted:
+            state = increment_coupang_count(state)
+            coupang_inserted = True
+            print("🛒 coupang inserted: True")
         else:
-            html2 = disclosure + "\n" + html2
+            print("⚠️ coupang planned BUT insert failed -> skip count/disclosure")
 
-        state = increment_coupang_count(state)
-        coupang_inserted = True
-        html = html2
-        print("🛒 coupang injected: URL found + CTA blocks inserted")
-
-    # 2) 실패: 로그를 남기고, 글은 그대로 진행(대가성 문구도 넣지 않음)
-    else:
-        html = html2
-        print("⚠️ coupang planned BUT no URL found in HTML (inject failed or stripped).")
-
-        state = increment_coupang_count(state)
-        coupang_inserted = True
-
-    # 12) 애드센스 슬롯 (✅ 튜플 반환 안전 처리)
+    # 12) 애드센스 슬롯 (모든 글 공통)
     html = _as_html(inject_adsense_slots(html))
     post["content_html"] = html
 
@@ -617,6 +551,7 @@ if topic == "life" and coupang_planned:
     )
     state = apply_cooldown_rules(state, topic=topic, img=image_style_for_stats, tv=thumb_variant, rule=rule)
 
+    # history 기록
     state = add_history_item(
         state,
         {
