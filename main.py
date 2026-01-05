@@ -1,4 +1,4 @@
-# main.py (UPGRADED ++)
+# main.py (UPGRADED + FINAL COPY/PASTE)
 from __future__ import annotations
 
 import base64
@@ -160,10 +160,15 @@ def _mark_ran_this_slot(state: dict, forced_slot: str, run_id: str) -> dict:
 
 
 def _pick_run_topic(state: dict) -> tuple[str, str]:
+    """
+    ✅ 핵심 규칙
+    - RUN_SLOT이 있으면: forced=RUN_SLOT, topic도 그대로 강제(회전 금지)
+    - RUN_SLOT이 없으면: 시간대 슬롯 기반 + 오늘 사용한 토픽 회전
+    """
     run_slot = _env("RUN_SLOT", "").lower()
     if run_slot in ("health", "trend", "life"):
         forced = run_slot
-        chosen = _choose_topic_with_rotation(state, forced)
+        chosen = forced  # ✅ 강제
         return forced, chosen
 
     forced = _slot_topic_kst()
@@ -260,7 +265,16 @@ def _title_angle(topic: str, seed: int) -> str:
     return rng.choice(pool)
 
 
-def _rewrite_title_openai(client, model: str, *, keyword: str, topic: str, angle: str, bad_title: str, recent_titles: list[str]) -> str:
+def _rewrite_title_openai(
+    client,
+    model: str,
+    *,
+    keyword: str,
+    topic: str,
+    angle: str,
+    bad_title: str,
+    recent_titles: list[str],
+) -> str:
     recent = "\n".join(f"- {t}" for t in recent_titles[:18])
     sys = "당신은 한국어 블로그 제목 편집자입니다. 조건을 지키며 제목 1개만 출력하세요."
     user = f"""
@@ -338,6 +352,7 @@ def _fallback_png_bytes(text: str) -> bytes:
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
 
         from io import BytesIO
+
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
@@ -368,11 +383,13 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             base_raw += f", {r}"
 
     if style_mode == "watercolor":
-        style = rng.choice([
-            "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
-            "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
-            "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
-        ])
+        style = rng.choice(
+            [
+                "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
+                "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
+                "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
+            ]
+        )
         comp = rng.choice(
             ["centered subject, minimal background, plenty of negative space", "iconic main object, simple props, soft morning light"]
             if variant == "hero"
@@ -383,11 +400,15 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
 
     if style_mode == "photo":
         style = rng.choice(
-            ["photorealistic e-commerce product photography, clean white background, softbox studio lighting, ultra sharp, centered",
-             "photorealistic product shot on minimal tabletop, studio lighting, crisp edges, high resolution"]
+            [
+                "photorealistic e-commerce product photography, clean white background, softbox studio lighting, ultra sharp, centered",
+                "photorealistic product shot on minimal tabletop, studio lighting, crisp edges, high resolution",
+            ]
             if variant == "hero"
-            else ["photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using item (no face), realistic textures",
-                  "photorealistic usage scene, close-up hands demonstrating item, shallow depth of field, natural indoor light, no faces"]
+            else [
+                "photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using item (no face), realistic textures",
+                "photorealistic usage scene, close-up hands demonstrating item, shallow depth of field, natural indoor light, no faces",
+            ]
         )
         comp = rng.choice(
             ["front view, centered, minimal props", "slight top-down angle, catalog composition"]
@@ -457,10 +478,11 @@ def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
         return []
 
     from urllib.parse import quote_plus
+
     raw_urls = [
         ("바로보기", f"https://www.coupang.com/np/search?q={quote_plus(kw)}"),
-        ("추천",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
-        ("할인",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
+        ("추천", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
+        ("할인", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
     ]
 
     # 2회 재시도
@@ -517,13 +539,13 @@ def _render_coupang_cta(url: str, *, variant: str) -> str:
 def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
     if not links:
         return ""
-    # 카드 3개(모바일에서도 버튼이 큼)
     items = []
     for label, url in links[:3]:
         badge = "💡" if label == "바로보기" else ("⭐" if label == "추천" else "🏷️")
         hint = "관련 상품 빠르게 보기" if label == "바로보기" else ("후기 많은 추천 옵션" if label == "추천" else "할인/쿠폰 적용 확인")
         btn = "지금 확인" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인 확인하기")
-        items.append(f"""
+        items.append(
+            f"""
 <div style="flex:1;min-width:220px;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;">
   <div style="font-weight:800;margin-bottom:6px;">{badge} {label}</div>
   <div style="color:#6b7280;font-size:13px;line-height:1.35;margin-bottom:10px;">{hint}</div>
@@ -532,7 +554,8 @@ def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
     {btn} →
   </a>
 </div>
-""".strip())
+""".strip()
+        )
     cards = "\n".join(items)
 
     return f"""
@@ -734,12 +757,18 @@ def run() -> None:
 
     # upload
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        hero_img_titled, make_ascii_filename("featured")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        hero_img_titled,
+        make_ascii_filename("featured"),
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        body_img, make_ascii_filename("body")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        body_img,
+        make_ascii_filename("body"),
     )
 
     # html
@@ -794,8 +823,12 @@ def run() -> None:
 
     # publish
     post_id = publish_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        post, hero_url, body_url,
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        post,
+        hero_url,
+        body_url,
         featured_media_id=hero_media_id,
     )
 
