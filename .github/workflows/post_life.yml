@@ -2,8 +2,7 @@ name: Post Life (19:00 KST)
 
 on:
   schedule:
-    # KST 19:00 = UTC 10:00
-    - cron: "0 10 * * *"
+    - cron: "0 10 * * *"  # 19:00 KST = 10:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -14,14 +13,20 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    env:
+      RUN_SLOT: life
+      STRICT_RUN_SLOT: "1"
+      SKIP_DUPLICATE_SLOT: "1"
+      ENFORCE_TIME_WINDOW: ${{ github.event_name == 'schedule' && '1' || '0' }}
+      SLOT_WINDOW_MIN: "120"
+      FORCE_COUPANG_IN_LIFE: "1"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
@@ -46,24 +51,13 @@ jobs:
 
       - name: Run script
         env:
-          RUN_SLOT: life
-          SKIP_DUPLICATE_SLOT: "1"
-
-          # ✅ life 슬롯에서 쿠팡 삽입을 '허용/강제' 하고 싶을 때
-          # (main.py에서 이 env를 읽어 강제하도록 만들어진 상태여야 의미가 있습니다)
-          FORCE_COUPANG_IN_LIFE: "1"
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
 
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-          NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
-          NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
-          NAVER_SEED_KEYWORDS_TREND: "2026트렌드,정부지원금,최신정책,신제품출시,사회이슈,경제이슈,소비트렌드,뉴스핵심"
           NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # OPENAI_MODEL: gpt-5-mini
-
-          # IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
           ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
@@ -75,21 +69,8 @@ jobs:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
-          # 쿠팡 파트너스(프로젝트에서 쓰는 값들만 유지)
-          COUPANG_PARTNER_ID: ${{ secrets.COUPANG_PARTNER_ID }}
-          COUPANG_TRACKING_CODE: ${{ secrets.COUPANG_TRACKING_CODE }}
-          COUPANG_MAX_PER_DAY: ${{ secrets.COUPANG_MAX_PER_DAY }}
-
-          MAX_POSTS_PER_DAY: "3"
-          MAX_USD_PER_MONTH: "30"
-          ALLOW_OVER_BUDGET: "1"
-
+          # ✅ life에서 쿠팡 딥링크 자동 생성에 필요
+          COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
+          COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
+          COUPANG_DISCLOSURE_TEXT: ${{ secrets.COUPANG_DISCLOSURE_TEXT }}
         run: python main.py
-
-      - name: Upload preview html
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: preview-html-life-${{ github.run_id }}
-          path: preview/*.html
-          if-no-files-found: warn
