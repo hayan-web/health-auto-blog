@@ -2,13 +2,18 @@ name: Auto WordPress Post
 
 on:
   schedule:
-    # 🇰🇷 KST 10:00 (UTC 01:00)
+    # 🇰🇷 KST 10:00 (UTC 01:00) -> health
     - cron: "0 1 * * *"
-    # 🇰🇷 KST 14:00 (UTC 05:00)
+    # 🇰🇷 KST 14:00 (UTC 05:00) -> trend
     - cron: "0 5 * * *"
-    # 🇰🇷 KST 19:00 (UTC 10:00)
+    # 🇰🇷 KST 19:00 (UTC 10:00) -> life
     - cron: "0 10 * * *"
   workflow_dispatch:
+    inputs:
+      slot:
+        description: "manual run slot (health/trend/life)"
+        required: false
+        default: "health"
 
 concurrency:
   group: wp-autopost-${{ github.ref }}
@@ -18,9 +23,9 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  post_health:
+    if: github.event_name != 'schedule' || github.event.schedule == '0 1 * * *'
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -41,7 +46,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ state.json 이어달리기 캐시 (최신 캐시 자동 복원)
       - name: Restore state cache
         uses: actions/cache@v4
         with:
@@ -50,47 +54,176 @@ jobs:
           restore-keys: |
             wp-state-${{ github.repository }}-
 
-      - name: Run script
+      - name: Run script (health)
         env:
-          # NAVER
+          RUN_SLOT: "health"
+          SLOT_WINDOW_MIN: "90"
+          SKIP_DUPLICATE_SLOT: "1"
+
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
 
-          # 시드 키워드 (라우팅용)
           NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
           NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
           NAVER_SEED_KEYWORDS_TREND: "2026트렌드,정부지원금,최신정책,신제품출시,사회이슈,경제이슈,소비트렌드,뉴스핵심"
 
-          # OpenAI
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # 선택: 이미지 키를 분리하고 싶을 때만
-          # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
-          # (선택) Gemini를 진짜로 쓸 때만 필요합니다.
-          # OpenAI-only 모드면 secrets에 없어도 되고, Settings에서도 필수 아님.
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
-          # ✅ AdSense (없으면 본문 광고 슬롯은 삽입되지 않습니다)
           ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
           ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
           ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
           ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
 
-          # WordPress
           WP_URL: ${{ secrets.WP_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
-
-          # 선택: 모델 지정(없으면 기본값 사용)
-          # OPENAI_MODEL: gpt-5-mini
-          # IMAGE_MODEL: gpt-image-1
         run: python main.py
 
       - name: Upload preview html
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: preview-html-${{ github.run_id }}
+          name: preview-html-health-${{ github.run_id }}
+          path: preview/*.html
+          if-no-files-found: warn
+
+
+  post_trend:
+    if: github.event_name != 'schedule' || github.event.schedule == '0 5 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install fonts (Korean)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            wp-state-${{ github.repository }}-
+
+      - name: Run script (trend)
+        env:
+          RUN_SLOT: "trend"
+          SLOT_WINDOW_MIN: "90"
+          SKIP_DUPLICATE_SLOT: "1"
+
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+
+          NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
+          NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
+          NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
+          NAVER_SEED_KEYWORDS_TREND: "2026트렌드,정부지원금,최신정책,신제품출시,사회이슈,경제이슈,소비트렌드,뉴스핵심"
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+          ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
+          ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
+          ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
+          ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
+
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+        run: python main.py
+
+      - name: Upload preview html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-html-trend-${{ github.run_id }}
+          path: preview/*.html
+          if-no-files-found: warn
+
+
+  post_life:
+    if: github.event_name != 'schedule' || github.event.schedule == '0 10 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install fonts (Korean)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: wp-state-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            wp-state-${{ github.repository }}-
+
+      - name: Run script (life)
+        env:
+          RUN_SLOT: "life"
+          SLOT_WINDOW_MIN: "90"
+          SKIP_DUPLICATE_SLOT: "1"
+          FORCE_COUPANG_IN_LIFE: "1"
+
+          # ✅ 쿠팡 딥링크 자동 생성용 (반드시 secrets에 추가)
+          COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
+          COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
+
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+
+          NAVER_SEED_KEYWORDS: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
+          NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
+          NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
+          NAVER_SEED_KEYWORDS_TREND: "2026트렌드,정부지원금,최신정책,신제품출시,사회이슈,경제이슈,소비트렌드,뉴스핵심"
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+          ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
+          ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
+          ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
+          ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
+
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+        run: python main.py
+
+      - name: Upload preview html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-html-life-${{ github.run_id }}
           path: preview/*.html
           if-no-files-found: warn
