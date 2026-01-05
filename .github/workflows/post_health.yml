@@ -1,0 +1,25 @@
+name: Post Health (10:00 KST)
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # 10:00 KST = 01:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: autopost-health
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      RUN_SLOT: health
+      SKIP_DUPLICATE_SLOT: "1"
+      FORCE_COUPANG_IN_LIFE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python main.py
