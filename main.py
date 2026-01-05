@@ -1,4 +1,4 @@
-# main.py (UPGRADED + FINAL COPY/PASTE)
+# main.py (UPGRADED FINAL - copy/paste)
 from __future__ import annotations
 
 import base64
@@ -160,33 +160,24 @@ def _mark_ran_this_slot(state: dict, forced_slot: str, run_id: str) -> dict:
 
 
 def _pick_run_topic(state: dict) -> tuple[str, str]:
-    """
-    ✅ 핵심 규칙
-    - RUN_SLOT이 있으면: forced=RUN_SLOT, topic도 그대로 강제(회전 금지)
-    - RUN_SLOT이 없으면: 시간대 슬롯 기반 + 오늘 사용한 토픽 회전
-    """
     run_slot = _env("RUN_SLOT", "").lower()
+    strict = _env_bool("STRICT_RUN_SLOT", "1")
+
     if run_slot in ("health", "trend", "life"):
         forced = run_slot
-        chosen = forced  # ✅ 강제
-        return forced, chosen
+        if strict:
+            return forced, forced
+        return forced, _choose_topic_with_rotation(state, forced)
 
     forced = _slot_topic_kst()
-    chosen = _choose_topic_with_rotation(state, forced)
-    return forced, chosen
+    return forced, _choose_topic_with_rotation(state, forced)
 
 
 def _expected_hour(slot: str) -> int:
-    # 원하는 고정 시간: health=10, trend=14, life=19 (KST)
     return {"health": 10, "trend": 14, "life": 19}.get(slot, 19)
 
 
 def _in_time_window(slot: str) -> bool:
-    """
-    스케줄이 엉뚱한 시간에 실행되면 자동 종료.
-    기본: 목표시간 ± 90분 이내만 허용 (env로 조절 가능)
-      SLOT_WINDOW_MIN=90
-    """
     win = _env_int("SLOT_WINDOW_MIN", 90)
     now = _kst_now()
     target = now.replace(hour=_expected_hour(slot), minute=0, second=0, microsecond=0)
@@ -203,16 +194,13 @@ def _normalize_title(title: str) -> str:
     t = unicodedata.normalize("NFKC", str(title)).strip()
     t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
 
-    # 연령대 제거
     t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
     t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
     t = re.sub(r"\b3040\b", "", t)
 
-    # 찌꺼기 제거
     t = re.sub(r"^\s*(대를|을|를)\s*위한\s+", "", t)
     t = re.sub(r"\s*(대를|을|를)\s*위한\s+", " ", t)
 
-    # 앞 숫자/기호 제거
     t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
     t = re.sub(r"\s{2,}", " ", t).strip()
     return t or str(title).strip()
@@ -265,16 +253,7 @@ def _title_angle(topic: str, seed: int) -> str:
     return rng.choice(pool)
 
 
-def _rewrite_title_openai(
-    client,
-    model: str,
-    *,
-    keyword: str,
-    topic: str,
-    angle: str,
-    bad_title: str,
-    recent_titles: list[str],
-) -> str:
+def _rewrite_title_openai(client, model: str, *, keyword: str, topic: str, angle: str, bad_title: str, recent_titles: list[str]) -> str:
     recent = "\n".join(f"- {t}" for t in recent_titles[:18])
     sys = "당신은 한국어 블로그 제목 편집자입니다. 조건을 지키며 제목 1개만 출력하세요."
     user = f"""
@@ -325,7 +304,7 @@ def _fallback_title(keyword: str, topic: str, angle: str) -> str:
 
 
 # -----------------------------
-# IMAGE PROMPTS (수채화/실사)
+# IMAGE PROMPTS
 # -----------------------------
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
@@ -352,7 +331,6 @@ def _fallback_png_bytes(text: str) -> bytes:
         draw.text(((1024 - w) / 2, (1024 - h) / 2), msg, fill=(60, 60, 60), font=font)
 
         from io import BytesIO
-
         buf = BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
@@ -383,13 +361,11 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             base_raw += f", {r}"
 
     if style_mode == "watercolor":
-        style = rng.choice(
-            [
-                "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
-                "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
-                "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
-            ]
-        )
+        style = rng.choice([
+            "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
+            "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
+            "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
+        ])
         comp = rng.choice(
             ["centered subject, minimal background, plenty of negative space", "iconic main object, simple props, soft morning light"]
             if variant == "hero"
@@ -424,7 +400,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
 
 
 # -----------------------------
-# COUPANG: 키워드 -> 딥링크 3개(키워드/추천/할인)
+# COUPANG: 키워드 -> 딥링크 3개 자동 생성
 # -----------------------------
 def _coupang_make_auth(method: str, path: str, query: str, access_key: str, secret_key: str) -> str:
     signed_date = datetime.utcnow().strftime("%y%m%dT%H%M%SZ")
@@ -469,23 +445,17 @@ def _coupang_deeplink_batch(urls: List[str]) -> List[str]:
 
 
 def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
-    """
-    반환: [(label, url), ...]
-    label: "바로보기" / "추천" / "할인"
-    """
     kw = keyword.strip()
     if not kw:
         return []
 
     from urllib.parse import quote_plus
-
     raw_urls = [
         ("바로보기", f"https://www.coupang.com/np/search?q={quote_plus(kw)}"),
-        ("추천", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
-        ("할인", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
+        ("추천",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
+        ("할인",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
     ]
 
-    # 2회 재시도
     for attempt in range(1, 3):
         shorts = _coupang_deeplink_batch([u for _, u in raw_urls])
         if len(shorts) >= 1:
@@ -544,8 +514,7 @@ def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
         badge = "💡" if label == "바로보기" else ("⭐" if label == "추천" else "🏷️")
         hint = "관련 상품 빠르게 보기" if label == "바로보기" else ("후기 많은 추천 옵션" if label == "추천" else "할인/쿠폰 적용 확인")
         btn = "지금 확인" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인 확인하기")
-        items.append(
-            f"""
+        items.append(f"""
 <div style="flex:1;min-width:220px;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;">
   <div style="font-weight:800;margin-bottom:6px;">{badge} {label}</div>
   <div style="color:#6b7280;font-size:13px;line-height:1.35;margin-bottom:10px;">{hint}</div>
@@ -554,8 +523,7 @@ def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
     {btn} →
   </a>
 </div>
-""".strip()
-        )
+""".strip())
     cards = "\n".join(items)
 
     return f"""
@@ -600,6 +568,9 @@ def run() -> None:
     S = Settings()
     run_id = uuid.uuid4().hex[:10]
 
+    event_name = _env("GITHUB_EVENT_NAME", "")
+    is_schedule = (event_name == "schedule")
+
     openai_client = make_openai_client(S.OPENAI_API_KEY)
     img_key = _env("IMAGE_API_KEY", "") or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
     img_client = make_gemini_client(img_key)
@@ -626,19 +597,22 @@ def run() -> None:
 
     # slot/topic
     forced_slot, topic = _pick_run_topic(state)
-    print(f"🕒 run_id={run_id} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
+    print(f"🕒 run_id={run_id} | event={event_name} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
 
-    # ✅ 시간대 엇박 방지: RUN_SLOT이 있을 때만 엄격 적용
+    # ✅ 시간창 강제는 "스케줄 실행"에서만 기본 적용 (수동 실행은 OFF 권장)
     if _env("RUN_SLOT", "").lower() in ("health", "trend", "life"):
-        if not _in_time_window(forced_slot):
-            print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit")
+        if is_schedule and _env_bool("ENFORCE_TIME_WINDOW", "1"):
+            if not _in_time_window(forced_slot):
+                print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit(0)")
+                return
+
+    # ✅ 같은 슬롯 중복 방지: 스케줄에서만 강제(수동 실행은 필요시 허용)
+    if is_schedule and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
+        if _already_ran_this_slot(state, forced_slot):
+            print(f"🛑 same slot already ran today: {forced_slot} → exit(0)")
             return
 
-    # ✅ 같은 슬롯 중복 방지(기본 ON)
-    if _already_ran_this_slot(state, forced_slot) and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
-        print(f"🛑 same slot already ran today: {forced_slot} → exit")
-        return
-
+    # mark run (여기까지 왔으면 실제로 발행 시도)
     state = _mark_ran_this_slot(state, forced_slot, run_id)
     save_state(state)
 
@@ -757,18 +731,12 @@ def run() -> None:
 
     # upload
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        hero_img_titled,
-        make_ascii_filename("featured"),
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        hero_img_titled, make_ascii_filename("featured")
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        body_img,
-        make_ascii_filename("body"),
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        body_img, make_ascii_filename("body")
     )
 
     # html
@@ -795,13 +763,9 @@ def run() -> None:
         coupang_urls = _coupang_links_from_keyword(keyword)
 
         if coupang_urls:
-            # 항상 최상단 대가성 문구
             html = _insert_disclosure_top(html)
 
-            # 카드(3개) + CTA(상/중/하)
             cards = _render_coupang_cards(coupang_urls, keyword=keyword)
-
-            # 대표 CTA는 첫 링크 사용
             primary_url = coupang_urls[0][1]
             cta_top = _render_coupang_cta(primary_url, variant="top")
             cta_mid = _render_coupang_cta(primary_url, variant="mid")
@@ -814,7 +778,6 @@ def run() -> None:
             coupang_inserted = True
             print("🛒 coupang injected: cards(3) + CTA(3)")
         else:
-            # 딥링크 실패면 '아예 안 넣음' (헛링크 방지)
             print("⚠️ coupang planned BUT deeplink generation failed → skip coupang for this post")
 
     # adsense
@@ -823,12 +786,8 @@ def run() -> None:
 
     # publish
     post_id = publish_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        post,
-        hero_url,
-        body_url,
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        post, hero_url, body_url,
         featured_media_id=hero_media_id,
     )
 
