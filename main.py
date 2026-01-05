@@ -94,6 +94,102 @@ def _as_html(x: Any) -> str:
 
 
 # -----------------------------
+# CLEANUP: 지시문/코드블럭/프롬프트 흔적 제거
+# -----------------------------
+_CLEAN_PATTERNS = [
+    r"\[제목/구성\s*지시\][\s\S]*?(?=\n\n|$)",  # 우리가 붙인 지시문 블럭
+    r"```[\s\S]*?```",  # 코드펜스 전체 제거
+    r"^\s*조건을\s*지키며[\s\S]*?(?=\n\n|$)",  # '조건을 지키며...' 류 섞일 때
+    r"^\s*출력은\s*.*한\s*줄만.*$",  # '출력은 한 줄만' 류
+    # 이미지 프롬프트 문구가 섞여 들어오는 케이스 방지(본문에서만 제거)
+    r"(single scene|no collage|no watermark|no logos|no brand names|no trademarks|no text|square 1:1)",
+    r"(watercolor illustration|photorealistic|softbox studio lighting|paper texture|title-safe area)",
+]
+
+
+def _clean_text(s: Any) -> str:
+    if not s:
+        return ""
+    out = str(s)
+
+    # 패턴 제거
+    for pat in _CLEAN_PATTERNS:
+        out = re.sub(pat, "", out, flags=re.IGNORECASE | re.MULTILINE)
+
+    # 공백 정리
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
+def _clean_post_payload(post: dict) -> dict:
+    """generate_blog_post 결과를 발행 전 정리"""
+    if not isinstance(post, dict):
+        return post
+
+    # title
+    if "title" in post:
+        post["title"] = _normalize_title(_clean_text(post.get("title", "")))
+
+    # bullets
+    for k in ("summary_bullets", "warning_bullets", "checklist_bullets"):
+        v = post.get(k)
+        if isinstance(v, list):
+            post[k] = [_clean_text(x) for x in v if _clean_text(x)]
+        elif isinstance(v, str):
+            post[k] = [_clean_text(v)] if _clean_text(v) else []
+
+    # outro
+    if "outro" in post:
+        post["outro"] = _clean_text(post.get("outro", ""))
+
+    # sections
+    secs = post.get("sections")
+    if isinstance(secs, list):
+        new_secs = []
+        for sec in secs:
+            if not isinstance(sec, dict):
+                continue
+            h = _clean_text(sec.get("heading", "") or sec.get("title", ""))
+            b = _clean_text(sec.get("body", "") or sec.get("content", ""))
+            if h or b:
+                sec2 = dict(sec)
+                if "heading" in sec2:
+                    sec2["heading"] = h
+                if "title" in sec2:
+                    sec2["title"] = h
+                if "body" in sec2:
+                    sec2["body"] = b
+                if "content" in sec2:
+                    sec2["content"] = b
+                new_secs.append(sec2)
+        post["sections"] = new_secs
+
+    return post
+
+
+def _clean_html(html: str) -> str:
+    """최종 HTML에서 지시문/코드조각이 남는 경우를 한 번 더 방지"""
+    if not html:
+        return ""
+    out = str(html)
+
+    # <p> 안에 들어간 지시문 라인 제거
+    out = re.sub(
+        r"(<p[^>]*>[\s\S]*?\[제목/구성\s*지시\][\s\S]*?</p>)",
+        "",
+        out,
+        flags=re.IGNORECASE,
+    )
+
+    # 혹시 남아있는 ``` 블럭 제거(HTML로 들어간 케이스)
+    out = re.sub(r"```[\s\S]*?```", "", out, flags=re.IGNORECASE)
+
+    # 공백 정리
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
+# -----------------------------
 # TIME / SLOT
 # -----------------------------
 def _kst_now() -> datetime:
@@ -253,7 +349,16 @@ def _title_angle(topic: str, seed: int) -> str:
     return rng.choice(pool)
 
 
-def _rewrite_title_openai(client, model: str, *, keyword: str, topic: str, angle: str, bad_title: str, recent_titles: list[str]) -> str:
+def _rewrite_title_openai(
+    client,
+    model: str,
+    *,
+    keyword: str,
+    topic: str,
+    angle: str,
+    bad_title: str,
+    recent_titles: list[str],
+) -> str:
     recent = "\n".join(f"- {t}" for t in recent_titles[:18])
     sys = "당신은 한국어 블로그 제목 편집자입니다. 조건을 지키며 제목 1개만 출력하세요."
     user = f"""
@@ -361,11 +466,13 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             base_raw += f", {r}"
 
     if style_mode == "watercolor":
-        style = rng.choice([
-            "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
-            "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
-            "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
-        ])
+        style = rng.choice(
+            [
+                "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
+                "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
+                "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
+            ]
+        )
         comp = rng.choice(
             ["centered subject, minimal background, plenty of negative space", "iconic main object, simple props, soft morning light"]
             if variant == "hero"
@@ -450,10 +557,11 @@ def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
         return []
 
     from urllib.parse import quote_plus
+
     raw_urls = [
         ("바로보기", f"https://www.coupang.com/np/search?q={quote_plus(kw)}"),
-        ("추천",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
-        ("할인",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
+        ("추천", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
+        ("할인", f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
     ]
 
     for attempt in range(1, 3):
@@ -485,6 +593,7 @@ def _insert_disclosure_top(html: str) -> str:
     return disclosure + "\n" + html
 
 
+# ✅ CTA: 100% 폭 고정(테마 충돌 방지)
 def _render_coupang_cta(url: str, *, variant: str) -> str:
     if variant == "top":
         headline, sub, btn = "🔥 쿠팡에서 가격/쿠폰 적용 확인", "쿠폰·옵션·배송은 시점에 따라 달라질 수 있어요.", "쿠팡에서 조건 보기"
@@ -494,44 +603,48 @@ def _render_coupang_cta(url: str, *, variant: str) -> str:
         headline, sub, btn = "🚚 구매 전 마지막 체크", "최종 가격·배송 조건을 한 번 더 확인하세요.", "가격/배송 확인하기"
 
     return f"""
-<div class="coupang-cta" style="border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin:14px 0;background:#fff;">
-  <div style="font-weight:800;font-size:16px;margin-bottom:6px;">{headline}</div>
-  <div style="color:#6b7280;font-size:13px;margin-bottom:10px;line-height:1.35;">{sub}</div>
+<div class="coupang-cta" style="width:100%;box-sizing:border-box;border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin:14px 0;background:#fff;">
+  <div style="font-weight:900;font-size:16px;margin-bottom:6px;">{headline}</div>
+  <div style="color:#6b7280;font-size:13px;margin-bottom:10px;line-height:1.45;">{sub}</div>
   <a href="{url}" target="_blank" rel="nofollow sponsored noopener"
-     style="display:block;text-align:center;padding:12px 14px;border-radius:10px;
-            background:#111827;color:#fff;text-decoration:none;font-weight:800;">
+     style="display:block;width:100%;box-sizing:border-box;text-align:center;padding:12px 14px;border-radius:10px;
+            background:#111827;color:#fff;text-decoration:none;font-weight:900;">
     {btn} →
   </a>
 </div>
 """.strip()
 
 
+# ✅ Cards: flex 제거 + 세로 스택(100% 폭)으로 테마 충돌 방지
 def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
     if not links:
         return ""
+
     items = []
     for label, url in links[:3]:
         badge = "💡" if label == "바로보기" else ("⭐" if label == "추천" else "🏷️")
-        hint = "관련 상품 빠르게 보기" if label == "바로보기" else ("후기 많은 추천 옵션" if label == "추천" else "할인/쿠폰 적용 확인")
-        btn = "지금 확인" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인 확인하기")
-        items.append(f"""
-<div style="flex:1;min-width:220px;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;">
-  <div style="font-weight:800;margin-bottom:6px;">{badge} {label}</div>
-  <div style="color:#6b7280;font-size:13px;line-height:1.35;margin-bottom:10px;">{hint}</div>
+        hint = "관련 상품을 빠르게 확인해요." if label == "바로보기" else ("후기 많은 옵션 위주로 봐요." if label == "추천" else "할인/쿠폰 적용 여부를 확인해요.")
+        btn = "지금 확인하기" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인 확인하기")
+
+        items.append(
+            f"""
+<div style="width:100%;box-sizing:border-box;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;margin:10px 0;">
+  <div style="font-weight:900;margin-bottom:6px;">{badge} {label}</div>
+  <div style="color:#6b7280;font-size:13px;line-height:1.45;margin-bottom:10px;">{hint}</div>
   <a href="{url}" target="_blank" rel="nofollow sponsored noopener"
-     style="display:block;text-align:center;padding:12px 14px;border-radius:10px;background:#198754;color:#fff;text-decoration:none;font-weight:800;">
+     style="display:block;width:100%;box-sizing:border-box;text-align:center;padding:12px 14px;border-radius:10px;background:#198754;color:#fff;text-decoration:none;font-weight:900;">
     {btn} →
   </a>
 </div>
-""".strip())
-    cards = "\n".join(items)
+""".strip()
+        )
+
+    body = "\n".join(items)
 
     return f"""
-<div class="coupang-cards" style="margin:16px 0;padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #e5e7eb;">
-  <div style="font-weight:900;font-size:16px;margin-bottom:10px;">🛒 ‘{keyword}’ 관련 쿠팡 빠른 확인</div>
-  <div style="display:flex;flex-wrap:wrap;gap:10px;">
-    {cards}
-  </div>
+<div class="coupang-cards" style="width:100%;box-sizing:border-box;margin:16px 0;padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #e5e7eb;">
+  <div style="font-weight:900;font-size:16px;margin-bottom:10px;">🛒 ‘{keyword}’ 쿠팡 빠른 확인</div>
+  {body}
   <div style="color:#6b7280;font-size:12px;line-height:1.4;margin-top:10px;">
     ※ 가격/쿠폰/배송은 시점에 따라 변동될 수 있습니다.
   </div>
@@ -569,7 +682,7 @@ def run() -> None:
     run_id = uuid.uuid4().hex[:10]
 
     event_name = _env("GITHUB_EVENT_NAME", "")
-    is_schedule = (event_name == "schedule")
+    is_schedule = event_name == "schedule"
 
     openai_client = make_openai_client(S.OPENAI_API_KEY)
     img_key = _env("IMAGE_API_KEY", "") or getattr(S, "IMAGE_API_KEY", "") or S.OPENAI_API_KEY
@@ -599,14 +712,14 @@ def run() -> None:
     forced_slot, topic = _pick_run_topic(state)
     print(f"🕒 run_id={run_id} | event={event_name} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
 
-    # ✅ 시간창 강제는 "스케줄 실행"에서만 기본 적용 (수동 실행은 OFF 권장)
+    # ✅ 시간창 강제는 "스케줄 실행"에서만 기본 적용
     if _env("RUN_SLOT", "").lower() in ("health", "trend", "life"):
         if is_schedule and _env_bool("ENFORCE_TIME_WINDOW", "1"):
             if not _in_time_window(forced_slot):
                 print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit(0)")
                 return
 
-    # ✅ 같은 슬롯 중복 방지: 스케줄에서만 강제(수동 실행은 필요시 허용)
+    # ✅ 같은 슬롯 중복 방지: 스케줄에서만 강제
     if is_schedule and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
         if _already_ran_this_slot(state, forced_slot):
             print(f"🛑 same slot already ran today: {forced_slot} → exit(0)")
@@ -662,6 +775,9 @@ def run() -> None:
     post, _ = quality_retry_loop(_gen, max_retry=3)
     post["title"] = _normalize_title(post.get("title", ""))
 
+    # ✅ 본문 살균 1차(지시문/코드 흔적 제거)
+    post = _clean_post_payload(post)
+
     # title rewrite only (최대 2회)
     for _ in range(2):
         t = post.get("title", "")
@@ -678,6 +794,9 @@ def run() -> None:
             post["title"] = new_t if new_t else _fallback_title(keyword, topic, angle)
         else:
             break
+
+    # ✅ title rewrite 이후에도 한 번 더 살균(혹시 섞인 문구 방지)
+    post = _clean_post_payload(post)
 
     # thumb title
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
@@ -731,12 +850,18 @@ def run() -> None:
 
     # upload
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        hero_img_titled, make_ascii_filename("featured")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        hero_img_titled,
+        make_ascii_filename("featured"),
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        body_img, make_ascii_filename("body")
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        body_img,
+        make_ascii_filename("body"),
     )
 
     # html
@@ -782,12 +907,20 @@ def run() -> None:
 
     # adsense
     html = _as_html(inject_adsense_slots(html))
+
+    # ✅ 최종 HTML 살균(혹시 남는 지시문/코드 조각 제거)
+    html = _clean_html(html)
+
     post["content_html"] = html
 
     # publish
     post_id = publish_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        post, hero_url, body_url,
+        S.WP_URL,
+        S.WP_USERNAME,
+        S.WP_APP_PASSWORD,
+        post,
+        hero_url,
+        body_url,
         featured_media_id=hero_media_id,
     )
 
