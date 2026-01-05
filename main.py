@@ -1,4 +1,4 @@
-# main.py (UPGRADED FINAL)
+# main.py (UPGRADED ++)
 from __future__ import annotations
 
 import base64
@@ -12,7 +12,7 @@ import time
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import requests
 
@@ -41,7 +41,6 @@ from app.cooldown import CooldownRule, apply_cooldown_rules
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
-from app.monetize_coupang import inject_coupang
 
 from app.image_stats import (
     record_impression as record_image_impression,
@@ -71,7 +70,7 @@ KST = timezone(timedelta(hours=9))
 
 
 # -----------------------------
-# env helpers
+# ENV
 # -----------------------------
 def _env(key: str, default: str = "") -> str:
     return (os.getenv(key) or default).strip()
@@ -81,15 +80,21 @@ def _env_bool(key: str, default: str = "0") -> bool:
     return _env(key, default).lower() in ("1", "true", "yes", "y", "on")
 
 
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(_env(key, str(default)))
+    except Exception:
+        return default
+
+
 def _as_html(x: Any) -> str:
-    """format_post_v2 / inject_* 가 (html, ...) 튜플을 반환하는 케이스 안전 처리"""
     if isinstance(x, tuple) and len(x) >= 1:
         return x[0] or ""
     return x or ""
 
 
 # -----------------------------
-# time/slot (RUN_SLOT 최우선)
+# TIME / SLOT
 # -----------------------------
 def _kst_now() -> datetime:
     return datetime.now(tz=KST)
@@ -101,7 +106,6 @@ def _kst_date_key(dt: datetime | None = None) -> str:
 
 
 def _slot_topic_kst(dt: datetime | None = None) -> str:
-    """fallback: KST 기준 슬롯 추정"""
     d = dt or _kst_now()
     h = d.hour
     if 9 <= h < 12:
@@ -117,14 +121,13 @@ def _topics_used_today(state: dict) -> set[str]:
     hist = (state or {}).get("history") or []
     if not isinstance(hist, list):
         return used
-    for it in reversed(hist[-200:]):
+    for it in reversed(hist[-300:]):
         if isinstance(it, dict) and it.get("kst_date") == today and it.get("topic"):
             used.add(str(it["topic"]))
     return used
 
 
 def _choose_topic_with_rotation(state: dict, forced: str) -> str:
-    """같은 슬롯이 중복 실행되면 남은 토픽으로 자동 회전(안전장치)"""
     order = ["health", "trend", "life"]
     used = _topics_used_today(state)
     if forced not in order:
@@ -140,12 +143,9 @@ def _choose_topic_with_rotation(state: dict, forced: str) -> str:
 
 
 def _already_ran_this_slot(state: dict, forced_slot: str) -> bool:
-    """스케줄 재시도/중복 트리거로 같은 슬롯이 또 돌면 종료(옵션)"""
     today = _kst_date_key()
     last = (state or {}).get("last_run") or {}
-    if isinstance(last, dict):
-        return last.get("kst_date") == today and last.get("forced_slot") == forced_slot
-    return False
+    return isinstance(last, dict) and last.get("kst_date") == today and last.get("forced_slot") == forced_slot
 
 
 def _mark_ran_this_slot(state: dict, forced_slot: str, run_id: str) -> dict:
@@ -160,10 +160,6 @@ def _mark_ran_this_slot(state: dict, forced_slot: str, run_id: str) -> dict:
 
 
 def _pick_run_topic(state: dict) -> tuple[str, str]:
-    """
-    ✅ RUN_SLOT이 있으면 100% 그 슬롯으로 고정
-    RUN_SLOT: health | trend | life
-    """
     run_slot = _env("RUN_SLOT", "").lower()
     if run_slot in ("health", "trend", "life"):
         forced = run_slot
@@ -175,8 +171,26 @@ def _pick_run_topic(state: dict) -> tuple[str, str]:
     return forced, chosen
 
 
+def _expected_hour(slot: str) -> int:
+    # 원하는 고정 시간: health=10, trend=14, life=19 (KST)
+    return {"health": 10, "trend": 14, "life": 19}.get(slot, 19)
+
+
+def _in_time_window(slot: str) -> bool:
+    """
+    스케줄이 엉뚱한 시간에 실행되면 자동 종료.
+    기본: 목표시간 ± 90분 이내만 허용 (env로 조절 가능)
+      SLOT_WINDOW_MIN=90
+    """
+    win = _env_int("SLOT_WINDOW_MIN", 90)
+    now = _kst_now()
+    target = now.replace(hour=_expected_hour(slot), minute=0, second=0, microsecond=0)
+    delta_min = abs(int((now - target).total_seconds() // 60))
+    return delta_min <= win
+
+
 # -----------------------------
-# Title 강화: 정규화 + 유사도 + 제목만 재작성
+# TITLE (유사도 강력 방지 + 제목만 재작성)
 # -----------------------------
 def _normalize_title(title: str) -> str:
     if not title:
@@ -189,7 +203,7 @@ def _normalize_title(title: str) -> str:
     t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
     t = re.sub(r"\b3040\b", "", t)
 
-    # '대를 위한' 찌꺼기 정리
+    # 찌꺼기 제거
     t = re.sub(r"^\s*(대를|을|를)\s*위한\s+", "", t)
     t = re.sub(r"\s*(대를|을|를)\s*위한\s+", " ", t)
 
@@ -211,9 +225,9 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / (len(a | b) or 1)
 
 
-def _recent_titles(history: list[dict], n: int = 18) -> list[str]:
+def _recent_titles(history: list[dict], n: int = 30) -> list[str]:
     out: list[str] = []
-    for it in reversed(history[-200:]):
+    for it in reversed(history[-400:]):
         if isinstance(it, dict) and it.get("title"):
             out.append(str(it["title"]))
         if len(out) >= n:
@@ -221,9 +235,9 @@ def _recent_titles(history: list[dict], n: int = 18) -> list[str]:
     return out
 
 
-def _title_too_similar(title: str, recent: list[str], threshold: float = 0.52) -> bool:
+def _title_too_similar(title: str, recent: list[str], threshold: float = 0.50) -> bool:
     a = _tokenize_ko(title)
-    for rt in recent[:12]:
+    for rt in recent[:18]:
         if _jaccard(a, _tokenize_ko(rt)) >= threshold:
             return True
     return False
@@ -238,27 +252,27 @@ def _stable_seed_int(*parts: str) -> int:
 def _title_angle(topic: str, seed: int) -> str:
     rng = random.Random(seed)
     if topic == "health":
-        pool = ["실천 체크", "주의할 점", "하루 루틴", "핵심 요약", "실수 줄이기"]
+        pool = ["실천 체크", "주의할 점", "하루 루틴", "핵심 요약", "실수 줄이기", "바로 시작"]
     elif topic == "trend":
-        pool = ["지금 포인트", "한눈 요약", "변화 정리", "초보 설명", "체크 포인트"]
+        pool = ["지금 포인트", "한눈 요약", "변화 정리", "초보 설명", "체크 포인트", "요점만"]
     else:
-        pool = ["바로 적용", "실전 정리", "자주 하는 실수", "빠른 정리", "가볍게 시작"]
+        pool = ["바로 적용", "실전 정리", "자주 하는 실수", "빠른 정리", "가볍게 시작", "핵심만"]
     return rng.choice(pool)
 
 
 def _rewrite_title_openai(client, model: str, *, keyword: str, topic: str, angle: str, bad_title: str, recent_titles: list[str]) -> str:
-    recent = "\n".join(f"- {t}" for t in recent_titles[:12])
+    recent = "\n".join(f"- {t}" for t in recent_titles[:18])
     sys = "당신은 한국어 블로그 제목 편집자입니다. 조건을 지키며 제목 1개만 출력하세요."
     user = f"""
 조건을 지키며 한국어 제목 1개만 만들어주세요.
 
 [조건]
 - 연령대/숫자(예: 30~50대, 20대, 3040 등) 언급 금지
-- 과장/낚시 금지, 자연스럽고 현실적인 표현
-- 15~30자 내외
-- 키워드를 자연스럽게 포함(가능하면)
-- 아래 '각도'를 반영해 뉘앙스를 바꿀 것: {angle}
-- 최근 제목들과 단어/구조 반복을 피할 것
+- 15~32자 내외
+- 과장/낚시 금지(현실적인 톤)
+- 키워드 자연스럽게 포함
+- 이번 글의 관점(각도): {angle}
+- 아래 최근 제목들과 단어/구조 반복 피하기
 - 출력은 제목 한 줄만(따옴표/번호/부가설명 금지)
 
 [주제] {topic}
@@ -287,17 +301,17 @@ def _fallback_title(keyword: str, topic: str, angle: str) -> str:
     kw = keyword.strip()
     if len(kw) > 18:
         kw = kw[:18].strip()
-    if topic == "health":
-        base = [f"{kw} {angle} 정리", f"{kw} {angle} 가이드", f"{kw} {angle} 체크리스트"]
-    elif topic == "trend":
-        base = [f"{kw} {angle} 정리", f"{kw} {angle} 요약", f"{kw} {angle} 핵심"]
-    else:
-        base = [f"{kw} {angle} 팁", f"{kw} {angle} 정리", f"{kw} {angle} 방법"]
+    base = [
+        f"{kw} {angle} 정리",
+        f"{kw} {angle} 가이드",
+        f"{kw} {angle} 체크리스트",
+        f"{kw} {angle} 팁",
+    ]
     return _normalize_title(random.choice(base))
 
 
 # -----------------------------
-# 이미지 프롬프트: health/trend=수채화, 쿠팡(life)=실사
+# IMAGE PROMPTS (수채화/실사)
 # -----------------------------
 def make_ascii_filename(prefix: str, ext: str = "png") -> str:
     uid = uuid.uuid4().hex[:10]
@@ -336,7 +350,6 @@ def _fallback_png_bytes(text: str) -> bytes:
 
 def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) -> str:
     rng = random.Random(seed + (1 if variant == "hero" else 2))
-
     base_raw = (base or "").strip()
     low = base_raw.lower()
 
@@ -355,37 +368,26 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
             base_raw += f", {r}"
 
     if style_mode == "watercolor":
-        wc_presets = [
+        style = rng.choice([
             "watercolor illustration, soft wash, paper texture, gentle edges, airy light, pastel palette",
             "watercolor + ink outline, light granulation, calm mood, soft shadows, minimal background",
             "delicate watercolor painting, subtle gradients, hand-painted feel, clean composition",
-        ]
-        style = rng.choice(wc_presets)
+        ])
         comp = rng.choice(
-            [
-                "centered subject, minimal background, plenty of negative space",
-                "iconic main object, simple props, soft morning light",
-            ]
+            ["centered subject, minimal background, plenty of negative space", "iconic main object, simple props, soft morning light"]
             if variant == "hero"
-            else [
-                "different angle from hero, include secondary elements",
-                "wider view, gentle perspective change, subtle props",
-            ]
+            else ["different angle from hero, include secondary elements", "wider view, gentle perspective change, subtle props"]
         )
         extra = "title-safe area on lower third" if variant == "hero" else "different composition from hero"
         return f"{base_raw}, {style}, {comp}, {extra}"
 
     if style_mode == "photo":
         style = rng.choice(
-            [
-                "photorealistic e-commerce product photography, clean white or light neutral background, softbox studio lighting, natural shadow, ultra sharp, centered",
-                "photorealistic product shot on minimal tabletop, studio lighting, crisp edges, high resolution",
-            ]
+            ["photorealistic e-commerce product photography, clean white background, softbox studio lighting, ultra sharp, centered",
+             "photorealistic product shot on minimal tabletop, studio lighting, crisp edges, high resolution"]
             if variant == "hero"
-            else [
-                "photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using the item (no face), realistic textures",
-                "photorealistic usage scene, close-up hands demonstrating the item, shallow depth of field, natural indoor light, no faces",
-            ]
+            else ["photorealistic lifestyle in-use photo in a tidy home, natural window light, hands using item (no face), realistic textures",
+                  "photorealistic usage scene, close-up hands demonstrating item, shallow depth of field, natural indoor light, no faces"]
         )
         comp = rng.choice(
             ["front view, centered, minimal props", "slight top-down angle, catalog composition"]
@@ -401,7 +403,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
 
 
 # -----------------------------
-# 쿠팡: 키워드 -> 검색URL -> 딥링크(단축) 자동 생성
+# COUPANG: 키워드 -> 딥링크 3개(키워드/추천/할인)
 # -----------------------------
 def _coupang_make_auth(method: str, path: str, query: str, access_key: str, secret_key: str) -> str:
     signed_date = datetime.utcnow().strftime("%y%m%dT%H%M%SZ")
@@ -414,7 +416,7 @@ def _coupang_deeplink_batch(urls: List[str]) -> List[str]:
     access_key = _env("COUPANG_ACCESS_KEY", "")
     secret_key = _env("COUPANG_SECRET_KEY", "")
     if not access_key or not secret_key:
-        print("⚠️ COUPANG_ACCESS_KEY/COUPANG_SECRET_KEY 없음 → 쿠팡 딥링크 생성 스킵")
+        print("⚠️ COUPANG_ACCESS_KEY/COUPANG_SECRET_KEY 없음 → 딥링크 생성 스킵")
         return []
 
     host = "https://api-gateway.coupang.com"
@@ -433,8 +435,8 @@ def _coupang_deeplink_batch(urls: List[str]) -> List[str]:
             print(f"⚠️ coupang deeplink http={r.status_code} body={r.text[:200]}")
             return []
         data = r.json()
-        out: List[str] = []
         arr = (data.get("data") or []) if isinstance(data, dict) else []
+        out: List[str] = []
         if isinstance(arr, list):
             for it in arr:
                 if isinstance(it, dict) and it.get("shortenUrl"):
@@ -445,44 +447,34 @@ def _coupang_deeplink_batch(urls: List[str]) -> List[str]:
         return []
 
 
-def _coupang_deeplink_from_keyword(keyword: str) -> str:
+def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
     """
-    키워드 → 쿠팡 검색 URL → 딥링크(단축) 1개 생성
-    실패 시 2회 재시도
+    반환: [(label, url), ...]
+    label: "바로보기" / "추천" / "할인"
     """
     kw = keyword.strip()
     if not kw:
-        return ""
+        return []
 
     from urllib.parse import quote_plus
-    search_urls = [
-        f"https://www.coupang.com/np/search?q={quote_plus(kw)}",
-        f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}",
-        f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}",
+    raw_urls = [
+        ("바로보기", f"https://www.coupang.com/np/search?q={quote_plus(kw)}"),
+        ("추천",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 추천')}"),
+        ("할인",   f"https://www.coupang.com/np/search?q={quote_plus(kw + ' 할인')}"),
     ]
 
+    # 2회 재시도
     for attempt in range(1, 3):
-        shorts = _coupang_deeplink_batch(search_urls)
-        if shorts:
-            return shorts[0]
+        shorts = _coupang_deeplink_batch([u for _, u in raw_urls])
+        if len(shorts) >= 1:
+            out: List[Tuple[str, str]] = []
+            for i, (label, _) in enumerate(raw_urls):
+                if i < len(shorts) and shorts[i]:
+                    out.append((label, shorts[i]))
+            return out
         time.sleep(0.8 * attempt)
-    return ""
 
-
-def _extract_first_coupang_url(html: str) -> str:
-    if not html:
-        return ""
-    m = re.search(
-        r'href=["\'](https?://[^"\']*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com|coupa\.ng)[^"\']*)["\']',
-        html,
-        re.I,
-    )
-    if m:
-        return m.group(1)
-    m = re.search(r'(https?://\S*(?:coupang\.com|coupang\.co\.kr|link\.coupang\.com|coupa\.ng)\S*)', html, re.I)
-    if m:
-        return m.group(1).rstrip(').,<>"]\'')
-    return ""
+    return []
 
 
 def _insert_disclosure_top(html: str) -> str:
@@ -522,6 +514,40 @@ def _render_coupang_cta(url: str, *, variant: str) -> str:
 """.strip()
 
 
+def _render_coupang_cards(links: List[Tuple[str, str]], keyword: str) -> str:
+    if not links:
+        return ""
+    # 카드 3개(모바일에서도 버튼이 큼)
+    items = []
+    for label, url in links[:3]:
+        badge = "💡" if label == "바로보기" else ("⭐" if label == "추천" else "🏷️")
+        hint = "관련 상품 빠르게 보기" if label == "바로보기" else ("후기 많은 추천 옵션" if label == "추천" else "할인/쿠폰 적용 확인")
+        btn = "지금 확인" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인 확인하기")
+        items.append(f"""
+<div style="flex:1;min-width:220px;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;">
+  <div style="font-weight:800;margin-bottom:6px;">{badge} {label}</div>
+  <div style="color:#6b7280;font-size:13px;line-height:1.35;margin-bottom:10px;">{hint}</div>
+  <a href="{url}" target="_blank" rel="nofollow sponsored noopener"
+     style="display:block;text-align:center;padding:12px 14px;border-radius:10px;background:#198754;color:#fff;text-decoration:none;font-weight:800;">
+    {btn} →
+  </a>
+</div>
+""".strip())
+    cards = "\n".join(items)
+
+    return f"""
+<div class="coupang-cards" style="margin:16px 0;padding:14px;border-radius:14px;background:#f8fafc;border:1px solid #e5e7eb;">
+  <div style="font-weight:900;font-size:16px;margin-bottom:10px;">🛒 ‘{keyword}’ 관련 쿠팡 빠른 확인</div>
+  <div style="display:flex;flex-wrap:wrap;gap:10px;">
+    {cards}
+  </div>
+  <div style="color:#6b7280;font-size:12px;line-height:1.4;margin-top:10px;">
+    ※ 가격/쿠폰/배송은 시점에 따라 변동될 수 있습니다.
+  </div>
+</div>
+""".strip()
+
+
 def _insert_after_first_ul(html: str, block: str) -> str:
     if not block:
         return html
@@ -545,7 +571,7 @@ def _insert_end(html: str, block: str) -> str:
 
 
 # -----------------------------
-# Main
+# RUN
 # -----------------------------
 def run() -> None:
     S = Settings()
@@ -575,10 +601,15 @@ def run() -> None:
     else:
         check_limits_or_raise(state, cfg)
 
-    # ✅ Topic 결정(스케줄 고정)
+    # slot/topic
     forced_slot, topic = _pick_run_topic(state)
-    used_today = sorted(list(_topics_used_today(state)))
-    print(f"🕒 run_id={run_id} | forced_slot={forced_slot} -> topic={topic} | used_today={used_today}")
+    print(f"🕒 run_id={run_id} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
+
+    # ✅ 시간대 엇박 방지: RUN_SLOT이 있을 때만 엄격 적용
+    if _env("RUN_SLOT", "").lower() in ("health", "trend", "life"):
+        if not _in_time_window(forced_slot):
+            print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit")
+            return
 
     # ✅ 같은 슬롯 중복 방지(기본 ON)
     if _already_ran_this_slot(state, forced_slot) and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
@@ -588,31 +619,30 @@ def run() -> None:
     state = _mark_ran_this_slot(state, forced_slot, run_id)
     save_state(state)
 
-    # Keyword
+    # keyword
     keyword, _ = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
 
-    # life 하위주제
+    # life subtopic
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
 
-    # Angle(뉘앙스 다양화)
+    # angle (제목/구성 다양화)
     seed = _stable_seed_int(keyword, run_id, str(int(time.time())))
     angle = _title_angle(topic, seed)
 
     system_prompt = build_system_prompt(topic)
     user_prompt = build_user_prompt(topic, keyword) + (
-        f"\n\n[제목/구성 지시] 이번 글은 '{angle}' 관점으로 구성해 주세요. "
-        "같은 톤/같은 문장 패턴 반복을 피하고, 제목은 자연스럽고 과장 없이."
+        f"\n\n[제목/구성 지시] 이번 글은 '{angle}' 관점으로 구성. "
+        "같은 단어/같은 문장 패턴 반복을 피하고, 소제목 표현도 다양하게."
     )
 
-    # style/thumb
     best_image_style, thumb_variant, _ = pick_best_publishing_combo(state, topic=topic)
-    recent = _recent_titles(history, n=18)
+    recent = _recent_titles(history, n=30)
 
-    # Generate post
+    # generate post
     def _gen():
         try:
             post = generate_blog_post(
@@ -626,7 +656,6 @@ def run() -> None:
             post = generate_blog_post(openai_client, S.OPENAI_MODEL, keyword)
 
         post["title"] = _normalize_title(post.get("title", ""))
-
         dup, reason = pick_retry_reason(post.get("title", ""), history)
         if dup or _title_too_similar(post.get("title", ""), recent):
             post["sections"] = []
@@ -636,7 +665,7 @@ def run() -> None:
     post, _ = quality_retry_loop(_gen, max_retry=3)
     post["title"] = _normalize_title(post.get("title", ""))
 
-    # 제목이 여전히 유사/이상하면 '제목만' 재작성 2회
+    # title rewrite only (최대 2회)
     for _ in range(2):
         t = post.get("title", "")
         if (not t) or len(t) < 8 or _title_too_similar(t, recent):
@@ -649,21 +678,18 @@ def run() -> None:
                 bad_title=t,
                 recent_titles=recent,
             )
-            if new_t:
-                post["title"] = new_t
-            else:
-                post["title"] = _fallback_title(keyword, topic, angle)
+            post["title"] = new_t if new_t else _fallback_title(keyword, topic, angle)
         else:
             break
 
-    # Thumb title
+    # thumb title
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
 
-    # ✅ 쿠팡 적용 규칙: life는 기본 ON (원치 않으면 env로 끄기)
+    # coupang plan: life 기본 ON (env로 끄기 가능)
     coupang_planned = bool(topic == "life" and _env_bool("FORCE_COUPANG_IN_LIFE", "1"))
 
-    # 이미지 스타일 강제
+    # image style
     forced_style_mode = ""
     if topic in ("health", "trend"):
         forced_style_mode = "watercolor"
@@ -677,7 +703,7 @@ def run() -> None:
     print("🎨 style_mode:", style_mode, "| forced:", bool(forced_style_mode), "| learned:", learned_style)
     print("🛒 coupang_planned:", coupang_planned)
 
-    # 이미지 프롬프트
+    # image prompts
     if topic == "life" and coupang_planned:
         base_prompt = (
             f"{keyword} related household item, practical home product, "
@@ -690,7 +716,6 @@ def run() -> None:
     hero_prompt = _build_image_prompt(base_prompt, variant="hero", seed=seed, style_mode=style_mode)
     body_prompt = _build_image_prompt(base_prompt, variant="body", seed=seed, style_mode=style_mode)
 
-    # 이미지 생성
     try:
         hero_img = generate_nanobanana_image_png_bytes(img_client, S.GEMINI_IMAGE_MODEL, hero_prompt)
     except Exception as e:
@@ -707,23 +732,17 @@ def run() -> None:
     body_img = to_square_1024(body_img)
     hero_img_titled = to_square_1024(add_title_to_image(hero_img, thumb_title))
 
-    # WP 업로드
+    # upload
     hero_url, hero_media_id = upload_media_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        hero_img_titled,
-        make_ascii_filename("featured"),
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        hero_img_titled, make_ascii_filename("featured")
     )
     body_url, _ = upload_media_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        body_img,
-        make_ascii_filename("body"),
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        body_img, make_ascii_filename("body")
     )
 
-    # HTML 생성
+    # html
     html = _as_html(
         format_post_v2(
             title=post["title"],
@@ -739,62 +758,48 @@ def run() -> None:
         )
     )
 
-    # ✅ 쿠팡: 키워드별 딥링크 자동 생성 + 버튼 CTA 3곳 강제
+    # ✅ COUPANG: 키워드별 딥링크 3개 자동 생성 + 카드 + CTA 3곳
     coupang_inserted = False
-    coupang_url = ""
+    coupang_urls: List[Tuple[str, str]] = []
 
     if topic == "life" and coupang_planned:
-        dynamic_link = _coupang_deeplink_from_keyword(keyword)
+        coupang_urls = _coupang_links_from_keyword(keyword)
 
-        if dynamic_link:
-            os.environ["COUPANG_LINK_URL"] = dynamic_link  # inject_coupang가 읽도록 주입
+        if coupang_urls:
+            # 항상 최상단 대가성 문구
+            html = _insert_disclosure_top(html)
 
-            html2 = _as_html(inject_coupang(html, keyword=keyword))
-            coupang_url = _extract_first_coupang_url(html2)
+            # 카드(3개) + CTA(상/중/하)
+            cards = _render_coupang_cards(coupang_urls, keyword=keyword)
 
-            # 1) inject에서 URL을 찾으면 그대로 강화
-            if coupang_url:
-                html2 = _insert_disclosure_top(html2)
-                html2 = _insert_after_first_ul(html2, _render_coupang_cta(coupang_url, variant="top"))
-                html2 = _insert_near_middle(html2, _render_coupang_cta(coupang_url, variant="mid"))
-                html2 = _insert_end(html2, _render_coupang_cta(coupang_url, variant="bottom"))
+            # 대표 CTA는 첫 링크 사용
+            primary_url = coupang_urls[0][1]
+            cta_top = _render_coupang_cta(primary_url, variant="top")
+            cta_mid = _render_coupang_cta(primary_url, variant="mid")
+            cta_bot = _render_coupang_cta(primary_url, variant="bottom")
 
-                html = html2
-                coupang_inserted = True
-                print("🛒 coupang injected: OK")
+            html = _insert_after_first_ul(html, cards + "\n" + cta_top)
+            html = _insert_near_middle(html, cta_mid)
+            html = _insert_end(html, cta_bot)
 
-            # 2) 테마가 링크를 strip하면, 최소 CTA라도 직접 삽입
-            else:
-                html2 = _insert_disclosure_top(html2)
-                html2 = _insert_after_first_ul(html2, _render_coupang_cta(dynamic_link, variant="top"))
-                html2 = _insert_near_middle(html2, _render_coupang_cta(dynamic_link, variant="mid"))
-                html2 = _insert_end(html2, _render_coupang_cta(dynamic_link, variant="bottom"))
-
-                html = html2
-                coupang_inserted = True
-                coupang_url = dynamic_link
-                print("🛒 coupang injected: fallback CTA (theme stripped link)")
-
+            coupang_inserted = True
+            print("🛒 coupang injected: cards(3) + CTA(3)")
         else:
-            # 딥링크 생성 실패면 '수익 안 잡히는 링크'를 넣지 않고 깔끔하게 스킵
+            # 딥링크 실패면 '아예 안 넣음' (헛링크 방지)
             print("⚠️ coupang planned BUT deeplink generation failed → skip coupang for this post")
 
-    # 애드센스
+    # adsense
     html = _as_html(inject_adsense_slots(html))
     post["content_html"] = html
 
-    # 발행
+    # publish
     post_id = publish_to_wp(
-        S.WP_URL,
-        S.WP_USERNAME,
-        S.WP_APP_PASSWORD,
-        post,
-        hero_url,
-        body_url,
+        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
+        post, hero_url, body_url,
         featured_media_id=hero_media_id,
     )
 
-    # 통계/학습 (✅ state 재대입 + increment_post_count는 return이 불확실하니 대입 금지)
+    # stats
     state = record_image_impression(state, image_style_for_stats)
     state = update_image_score(state, image_style_for_stats)
     state = record_topic_style_impression(state, topic, image_style_for_stats)
@@ -831,7 +836,7 @@ def run() -> None:
             "life_subtopic": life_subtopic,
             "coupang_planned": coupang_planned,
             "coupang_inserted": coupang_inserted,
-            "coupang_url": coupang_url,
+            "coupang_urls": coupang_urls,
             "kst_date": _kst_date_key(),
             "kst_hour": _kst_now().hour,
             "forced_slot": forced_slot,
