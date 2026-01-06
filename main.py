@@ -417,14 +417,28 @@ def _coupang_links_html(links: List[Tuple[str, str]], keyword: str) -> str:
     if not links:
         return ""
 
-    items = []
+    btns = []
     for label, url in links[:3]:
-        text = "쿠팡에서 바로보기" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인/쿠폰 확인")
-        # style 속성 제거(코드 노출 원인 1순위)
-        items.append(f'<li><a href="{url}" rel="nofollow sponsored noopener">{text} →</a></li>')
+        if label == "바로보기":
+            text = "쿠팡에서 바로보기"
+            cls = "primary"
+        elif label == "추천":
+            text = "추천 옵션 보기"
+            cls = "secondary"
+        else:
+            text = "할인/쿠폰 확인"
+            cls = "tertiary"
 
-    ul = "<ul>\n" + "\n".join(items) + "\n</ul>"
-    return f"<h3>‘{keyword}’ 관련 쿠팡 빠른 확인</h3>\n{ul}"
+        btns.append(
+            f'<a class="coupang-btn {cls}" href="{url}" target="_blank" '
+            f'rel="nofollow sponsored noopener">{text}</a>'
+        )
+
+    return (
+        f"<h3>‘{keyword}’ 관련 빠른 확인</h3>\n"
+        f'<div class="coupang-btn-wrap">\n' + "\n".join(btns) + "\n</div>"
+        f"<p><em>※ 가격/쿠폰/배송은 시점에 따라 변동될 수 있습니다.</em></p>"
+    )
 
 
 # -----------------------------
