@@ -38,6 +38,7 @@ from app.keyword_picker import pick_keyword_by_naver
 from app.click_ingest import ingest_click_log
 from app.prioritizer import pick_best_publishing_combo
 from app.cooldown import CooldownRule, apply_cooldown_rules
+from app.news_context import build_news_context
 
 from app.formatter_v2 import format_post_v2
 from app.monetize_adsense import inject_adsense_slots
@@ -700,7 +701,13 @@ def run() -> None:
     angle = _title_angle(topic, seed)
 
     system_prompt = build_system_prompt(topic)
-    user_prompt = build_user_prompt(topic, keyword) + (
+
+    extra_context = ""
+    if topic == "trend":
+        # ✅ 이슈 글만: 뉴스 컨텍스트 붙이기(사실 기반 강화)
+        extra_context = build_news_context(keyword)
+
+    user_prompt = build_user_prompt(topic, keyword, extra_context=extra_context) + (
         f"\n\n[제목/구성 지시] 이번 글은 '{angle}' 관점으로 구성. "
         "같은 단어/같은 문장 패턴 반복을 피하고, 소제목 표현도 다양하게."
     )
