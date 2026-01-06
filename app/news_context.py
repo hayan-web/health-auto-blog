@@ -4,10 +4,10 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Tuple
+from urllib.parse import urlparse
 
 import requests
-
 
 KST = timezone(timedelta(hours=9))
 
@@ -26,7 +26,6 @@ def _env_int(key: str, default: int) -> int:
 def _strip_tags(s: str) -> str:
     if not s:
         return ""
-    # Naver news API는 <b>태그를 섞어줍니다
     s = re.sub(r"<[^>]+>", "", s)
     s = s.replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     s = re.sub(r"\s+", " ", s).strip()
@@ -34,10 +33,7 @@ def _strip_tags(s: str) -> str:
 
 
 def _parse_pubdate(pub: str) -> str:
-    """
-    Naver pubDate 예: 'Mon, 06 Jan 2026 12:34:56 +0900'
-    실패하면 빈 문자열
-    """
+    # Naver pubDate 예: 'Mon, 06 Jan 2026 12:34:56 +0900'
     if not pub:
         return ""
     try:
@@ -47,24 +43,52 @@ def _parse_pubdate(pub: str) -> str:
         return ""
 
 
-def fetch_naver_news_items(query: str, *, display: int = 8, sort: str = "date", timeout: int = 12) -> List[Dict[str, Any]]:
+def _domain_of(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        d = urlparse(url).netloc.lower()
+        d = d.replace("www.", "")
+        return d
+    except Exception:
+        return ""
+
+
+def _tokenize(text: str) -> set[str]:
+    t = re.sub(r"[^0-9A-Za-z가-힣\s]", " ", text or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return set([x for x in t.split(" ") if len(x) >= 2])
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    return len(a & b) / (len(a | b) or 1)
+
+
+def is_policy_keyword(keyword: str) -> bool:
     """
-    네이버 검색 API(뉴스)에서 최근 기사 목록을 가져옵니다.
-    - display: 최대 100까지 가능(정책/권한에 따라 다를 수 있음)
-    - sort: 'date' or 'sim'
+    '정부지원금/정책/신청/제도/보조금/세금/대출/금리/복지' 등
+    공공/정책 성격이면 공식 톤 강제.
     """
+    k = (keyword or "").lower()
+    signals = [
+        "지원금", "보조금", "정책", "제도", "신청", "접수", "대상", "요건", "서류", "기한",
+        "정부", "지자체", "복지", "세금", "연말정산", "환급", "대출", "금리", "규정",
+        "법", "시행", "고시", "공고", "변경", "개정",
+    ]
+    return any(s in k for s in signals)
+
+
+def fetch_naver_news_items(query: str, *, display: int = 10, sort: str = "date", timeout: int = 12) -> List[Dict[str, Any]]:
     client_id = _env("NAVER_CLIENT_ID", "")
     client_secret = _env("NAVER_CLIENT_SECRET", "")
-
     if not client_id or not client_secret:
         print("⚠️ NAVER_CLIENT_ID/SECRET 없음 → 뉴스 컨텍스트 스킵")
         return []
 
     url = "https://openapi.naver.com/v1/search/news.json"
-    headers = {
-        "X-Naver-Client-Id": client_id,
-        "X-Naver-Client-Secret": client_secret,
-    }
+    headers = {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}
     params = {"query": query, "display": max(1, min(display, 30)), "sort": sort}
 
     try:
@@ -80,11 +104,38 @@ def fetch_naver_news_items(query: str, *, display: int = 8, sort: str = "date", 
         return []
 
 
+def _dedupe_news(items: List[Dict[str, Any]], sim_threshold: float = 0.62) -> List[Dict[str, Any]]:
+    """
+    제목 유사(자카드) 중복 제거
+    """
+    kept: List[Dict[str, Any]] = []
+    tokens_kept: List[set[str]] = []
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = _strip_tags(str(it.get("title", "")))
+        if len(title) < 6:
+            continue
+        tok = _tokenize(title)
+        dup = False
+        for kt in tokens_kept:
+            if _jaccard(tok, kt) >= sim_threshold:
+                dup = True
+                break
+        if dup:
+            continue
+        kept.append(it)
+        tokens_kept.append(tok)
+    return kept
+
+
 def build_news_context(keyword: str) -> str:
     """
-    모델에 붙일 '추가 컨텍스트' 문자열을 만듭니다.
-    - URL은 모델이 본문에 그대로 뱉어버릴 수 있어 기본적으로 넣지 않습니다.
-    - 제목/요약/날짜만 제공해 사실 기반 작성 유도.
+    ✅ 모델에 제공할 뉴스 컨텍스트:
+    - 최대 3개(기본)
+    - 제목/요약/날짜/도메인만 제공(링크 원문은 미제공)
+    - '이 범위 밖 사실 단정 금지'를 강하게 명시
     """
     if not keyword:
         return ""
@@ -93,31 +144,30 @@ def build_news_context(keyword: str) -> str:
     if not enable:
         return ""
 
-    display = _env_int("NEWS_CONTEXT_ITEMS", 8)
-    max_chars = _env_int("NEWS_CONTEXT_MAX_CHARS", 1200)
+    display = _env_int("NEWS_CONTEXT_ITEMS", 10)
+    keep = _env_int("NEWS_CONTEXT_KEEP", 3)
+    max_chars = _env_int("NEWS_CONTEXT_MAX_CHARS", 900)
 
     items = fetch_naver_news_items(keyword, display=display, sort="date")
+    items = _dedupe_news(items, sim_threshold=float(_env("NEWS_CONTEXT_SIM_THRESHOLD", "0.62") or "0.62"))
 
     lines: List[str] = []
     total = 0
 
     for it in items:
-        if not isinstance(it, dict):
-            continue
-
         title = _strip_tags(str(it.get("title", "")))
         desc = _strip_tags(str(it.get("description", "")))
         pub = _parse_pubdate(str(it.get("pubDate", "")))
 
-        # 너무 짧은 건 제외
-        if len(title) < 6:
-            continue
+        # source domain (originallink 우선)
+        src = _domain_of(str(it.get("originallink", "")) or str(it.get("link", "")))
 
-        # 설명이 너무 길면 적당히 컷
         if len(desc) > 120:
             desc = desc[:120].rstrip() + "…"
 
         one = f"- ({pub}) {title}"
+        if src:
+            one += f" [{src}]"
         if desc:
             one += f" / {desc}"
 
@@ -126,13 +176,15 @@ def build_news_context(keyword: str) -> str:
 
         lines.append(one)
         total += len(one) + 1
-
-        if len(lines) >= max(3, min(display, 12)):
+        if len(lines) >= max(1, min(keep, 5)):
             break
 
     if not lines:
         return ""
 
-    # 모델이 ‘사실’로 착각하지 않도록 톤을 명확히
-    header = "아래는 키워드 관련 최근 뉴스 검색 결과의 제목/요약입니다. 이 범위 안에서만 사실을 정리하세요."
-    return header + "\n" + "\n".join(lines)
+    header = (
+        "아래는 ‘키워드 관련 최근 뉴스 검색 결과(제목/요약/날짜/출처도메인)’입니다.\n"
+        "⚠️ 반드시 아래 내용에서 확인 가능한 범위로만 사실을 요약하세요.\n"
+        "⚠️ 아래에 없는 구체 수치/날짜/기관명/발표 내용은 임의로 만들지 마세요.\n"
+    )
+    return header + "\n".join(lines)
