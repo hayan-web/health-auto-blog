@@ -1,66 +1,92 @@
 # app/formatter_v2.py
 from __future__ import annotations
 
-from typing import Any, List, Dict
+import html
+import re
+from typing import Any, Dict, List, Optional
 
 
-def _esc(s: str) -> str:
-    # 아주 단순한 escape(필요 최소)
-    return (
-        (s or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+def _env(key: str, default: str = "") -> str:
+    import os
+    return (os.getenv(key) or default).strip()
+
+
+def _escape(s: str) -> str:
+    return html.escape(s or "", quote=False)
+
+
+def _inline_markup(text: str) -> str:
+    """
+    - 모델이 본문에서 **강조** 를 쓰면 -> 색/굵기 span으로 변환
+    - 나머지는 안전하게 escape
+    """
+    raw = text or ""
+    esc = _escape(raw)
+
+    # **bold** -> highlight
+    esc = re.sub(
+        r"\*\*(.+?)\*\*",
+        r"<span class='hl'>\1</span>",
+        esc,
+        flags=re.DOTALL,
     )
+    return esc
+
+
+def _ads_slot(slot: str) -> str:
+    """
+    수동 광고 코드(애드센스)를 env로 넣고 싶으면:
+      ADSENSE_MANUAL_TOP / MID / BOTTOM
+    가 비어있으면 슬롯 마커만 남겨둠(나중에 치환 가능).
+    """
+    mapping = {
+        "top": _env("ADSENSE_MANUAL_TOP", ""),
+        "mid": _env("ADSENSE_MANUAL_MID", ""),
+        "bottom": _env("ADSENSE_MANUAL_BOTTOM", ""),
+    }
+    code = mapping.get(slot, "")
+    if code:
+        return f"<div class='ad ad-{slot}'>{code}</div>"
+    return f"<!-- ADSENSE:{slot.upper()} -->"
+
+
+def _h2(title: str) -> str:
+    return f"""
+<h2 class="sec-title">
+  <span>{_escape(title)}</span>
+</h2>
+""".strip()
 
 
 def _p(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    return f"<p class='p'>{_esc(t)}</p>"
+    return f"<p class='para'>{_inline_markup(t)}</p>"
 
 
-def _li(items: List[str]) -> str:
-    items = [i.strip() for i in (items or []) if (i or "").strip()]
+def _ul(items: Optional[List[str]]) -> str:
     if not items:
         return ""
-    lis = "".join([f"<li>{_esc(x)}</li>" for x in items])
-    return f"<ul class='ul'>{lis}</ul>"
+    lis = []
+    for it in items:
+        it = (it or "").strip()
+        if not it:
+            continue
+        lis.append(f"<li>{_inline_markup(it)}</li>")
+    if not lis:
+        return ""
+    return "<ul class='bullets'>" + "\n".join(lis) + "</ul>"
 
 
-def _card(title: str, body: str | None = None, bullets: List[str] | None = None) -> str:
-    body_html = _p(body or "")
-    bullets_html = _li(bullets or [])
+def _img(url: str, alt: str = "") -> str:
+    if not url:
+        return ""
     return f"""
-    <section class="card">
-      <div class="card-title">✅ {_esc(title)}</div>
-      <div class="card-body">
-        {body_html}
-        {bullets_html}
-      </div>
-    </section>
-    """.strip()
-
-
-def _warning_box(title: str, bullets: List[str]) -> str:
-    bullets_html = _li(bullets)
-    return f"""
-    <section class="warn">
-      <div class="warn-title">⚠️ {_esc(title)}</div>
-      <div class="warn-body">{bullets_html}</div>
-    </section>
-    """.strip()
-
-
-def _summary_box(keyword: str, bullets: List[str]) -> str:
-    bullets_html = _li(bullets)
-    return f"""
-    <section class="summary">
-      <div class="summary-title">📌 1분 요약 ({_esc(keyword)})</div>
-      <div class="summary-body">{bullets_html}</div>
-    </section>
-    """.strip()
+<div class="img-wrap">
+  <img src="{_escape(url)}" alt="{_escape(alt)}" loading="lazy" />
+</div>
+""".strip()
 
 
 def format_post_v2(
@@ -70,132 +96,129 @@ def format_post_v2(
     hero_url: str,
     body_url: str,
     disclosure_html: str = "",
-    summary_bullets: List[str] | None = None,
-    sections: List[Dict[str, Any]] | None = None,
-    warning_bullets: List[str] | None = None,
-    checklist_bullets: List[str] | None = None,
+    summary_bullets: Optional[List[str]] = None,
+    sections: Optional[List[Dict[str, Any]]] = None,
+    warning_bullets: Optional[List[str]] = None,
+    checklist_bullets: Optional[List[str]] = None,
     outro: str = "",
 ) -> str:
     """
-    - 상단 대표 이미지 1장 + (중간) 이미지 1장 포함
-    - '캡처 레퍼런스'처럼: 요약박스/카드/주의박스/체크리스트형
-    - 애드센스 수동광고 슬롯 3개 마커 포함:
-        1) 요약박스 위
-        2) 첫 카드(소제목카드) 위
-        3) 맨 아래
+    sections 예시:
+      [{"title":"...", "body":["문단1","문단2"], "bullets":["...","..."]}, ...]
     """
-    summary_bullets = summary_bullets or [
-        "오늘 바로 할 수 있는 관리법 3가지만 기억하세요",
-        "증상이 지속되면 병원 상담이 우선입니다",
-        "생활습관/운동/식단을 한 번에 정리했습니다",
-    ]
-
     sections = sections or []
-    warning_bullets = warning_bullets or [
-        "갑작스러운 극심한 통증, 호흡곤란, 식은땀/어지럼이 동반되면 즉시 진료가 필요합니다",
-        "기저질환(심장/폐질환)이 있으면 자가판단을 피하세요",
-    ]
-    checklist_bullets = checklist_bullets or [
-        "무리하지 않는 선에서 10~20분 가벼운 걷기부터",
-        "수면/카페인/음주 패턴 점검",
-        "통증/증상 기록(언제, 얼마나, 무엇을 할 때?)",
-    ]
+    # 최소 3개 섹션으로 맞추기(없으면 빈 값 채워서라도 틀 유지)
+    while len(sections) < 3:
+        sections.append({"title": "", "body": [], "bullets": []})
 
-    # ✅ 본문 CSS(테마 영향 최소로 '클래스' 위주)
+    # 섹션 정리
+    def sec_title(i: int) -> str:
+        t = (sections[i].get("title") or "").strip()
+        if t:
+            return t
+        # 제목이 비면 키워드 기반 기본값
+        base = ["핵심 정리", "실전 팁", "체크리스트/주의점"]
+        return f"{keyword} {base[i] if i < len(base) else '정리'}".strip()
+
+    def sec_body(i: int) -> List[str]:
+        b = sections[i].get("body")
+        if isinstance(b, list):
+            return [str(x) for x in b if str(x).strip()]
+        # 문자열로 오는 케이스 방어
+        if isinstance(b, str) and b.strip():
+            return [b.strip()]
+        return []
+
+    def sec_bullets(i: int) -> List[str]:
+        bl = sections[i].get("bullets")
+        if isinstance(bl, list):
+            return [str(x) for x in bl if str(x).strip()]
+        return []
+
+    # 스타일(CSS)
     css = """
 <style>
-  .wrap{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif; line-height:1.85; color:#222; letter-spacing:-0.2px;}
-  .hero{margin:0 0 18px;}
-  .hero img{width:100%; max-width:900px; display:block; margin:0 auto; border-radius:16px; box-shadow:0 8px 24px rgba(0,0,0,.10);}
-  .disclosure{background:#fff3f3; border:1px solid #ffd3d3; color:#b30000; padding:12px 14px; border-radius:12px; font-size:14px; margin:14px 0 18px;}
-  .summary{background:#f3f8ff; border:1px solid #d8e9ff; padding:16px; border-radius:14px; margin:18px 0;}
-  .summary-title{font-weight:800; font-size:18px; margin:0 0 10px;}
-  .card{background:#ffffff; border:1px solid #e7ecf2; border-radius:14px; padding:16px; margin:16px 0; box-shadow:0 6px 18px rgba(0,0,0,.06);}
-  .card-title{font-weight:800; font-size:17px; margin:0 0 10px;}
-  .p{margin:0 0 12px; font-size:16.5px;}
-  .ul{margin:0; padding-left:18px;}
-  .ul li{margin:8px 0; font-size:16.5px;}
-  .midimg{margin:22px 0;}
-  .midimg img{width:100%; max-width:900px; display:block; margin:0 auto; border-radius:16px; box-shadow:0 8px 22px rgba(0,0,0,.10);}
-  .warn{background:#fff7e8; border:1px solid #ffe0a8; padding:16px; border-radius:14px; margin:18px 0;}
-  .warn-title{font-weight:900; font-size:17px; margin:0 0 10px;}
-  .check{background:#f2fff6; border:1px solid #c9f1d6; padding:16px; border-radius:14px; margin:18px 0;}
-  .check-title{font-weight:900; font-size:17px; margin:0 0 10px;}
-  .ads{margin:18px 0; display:block;}
+  .wrap { max-width: 760px; margin: 0 auto; padding: 18px 14px; font-family: 'Malgun Gothic','Apple SD Gothic Neo',sans-serif; line-height: 1.8; color:#111827; }
+  h1.title { font-size: 30px; font-weight: 900; margin: 6px 0 14px; letter-spacing:-0.4px; }
+  .meta { color:#6b7280; font-size:13px; margin-bottom:12px; }
+  .sec-title { margin: 22px 0 10px; padding: 10px 12px; border-left: 6px solid #111827; background: #f3f4f6; border-radius: 10px; font-size: 18px; font-weight: 900; }
+  .para { margin: 0 0 12px; font-size: 16px; }
+  .bullets { margin: 10px 0 16px 18px; }
+  .bullets li { margin: 6px 0; }
+  .img-wrap { margin: 16px 0; }
+  .img-wrap img { width: 100%; border-radius: 14px; box-shadow: 0 6px 18px rgba(0,0,0,0.10); display:block; }
+  .summary { background:#ecfeff; border:1px solid #a5f3fc; border-radius:14px; padding:14px 14px; margin: 12px 0 16px; }
+  .summary h3 { margin: 0 0 8px; font-size: 16px; font-weight: 900; }
+  .disclosure { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; border-radius:14px; padding:12px 14px; margin: 10px 0 14px; }
+  .disclosure strong { font-weight: 900; }
+  .hl { color:#0ea5e9; font-weight: 900; }
+  .ad { margin: 18px 0; padding: 10px; border: 1px dashed #e5e7eb; border-radius: 12px; background:#fff; }
 </style>
 """.strip()
 
-    # ✅ 애드센스 슬롯 마커(나중에 inject에서 치환)
-    ad_top = "<div class='ads'><!--AD_SLOT_TOP--></div>"
-    ad_mid = "<div class='ads'><!--AD_SLOT_MID--></div>"
-    ad_bottom = "<div class='ads'><!--AD_SLOT_BOTTOM--></div>"
+    # 상단 대가성 문구(있으면)
+    disclosure_block = ""
+    if disclosure_html:
+        disclosure_block = f"<div class='disclosure'>{disclosure_html}</div>"
 
-    disclosure_block = f"<div class='disclosure'>{disclosure_html}</div>" if disclosure_html.strip() else ""
-
-    summary = _summary_box(keyword, summary_bullets)
-
-    # 카드 섹션 구성
-    cards_html = []
-    for s in sections:
-        st = (s.get("title") or "").strip()
-        sb = (s.get("body") or "").strip()
-        bullets = s.get("bullets") or s.get("points") or []
-        if not st:
-            continue
-        cards_html.append(_card(st, sb, bullets))
-
-    if not cards_html:
-        # fallback: 카드 3개를 강제로 만들어 “줄글” 방지
-        cards_html = [
-            _card("원인으로 자주 나오는 경우", "가장 흔한 케이스부터 정리합니다.", ["근육/자세/과사용", "위장/역류성 증상", "스트레스/과호흡"]),
-            _card("집에서 해볼 수 있는 관리", "무리 없는 선에서 우선순위만 잡습니다.", ["온찜질/가벼운 스트레칭", "카페인/음주 줄이기", "수면 리듬 고정"]),
-            _card("병원 가야 하는 신호", "아래 신호가 있으면 지체하지 마세요.", ["호흡곤란/식은땀", "갑자기 심해지는 통증", "기저질환 동반"]),
-        ]
-
-    warn = _warning_box("이런 증상은 병원 우선", warning_bullets)
-
-    checklist = f"""
-    <section class="check">
-      <div class="check-title">✅ 오늘의 체크리스트</div>
-      {_li(checklist_bullets)}
-    </section>
-    """.strip()
-
-    outro_html = _p(outro) if outro.strip() else ""
-
-    # ✅ 상단/중간 이미지 포함(문서 안에서 “딱 2장”만)
-    hero = f"""
-    <div class="hero">
-      <img src="{hero_url}" alt="{_esc(title)}" />
-    </div>
-    """.strip()
-
-    midimg = f"""
-    <div class="midimg">
-      <img src="{body_url}" alt="{_esc(title)} 관련 이미지" />
-    </div>
-    """.strip()
-
-    html = f"""
-{css}
-<div class="wrap">
-  {disclosure_block}
-  {hero}
-
-  {ad_top}
-  {summary}
-
-  {ad_mid}
-  {''.join(cards_html)}
-
-  {midimg}
-
-  {warn}
-  {checklist}
-  {outro_html}
-
-  {ad_bottom}
+    # 요약 블록
+    summary_block = ""
+    if summary_bullets:
+        summary_block = f"""
+<div class="summary">
+  <h3>✅ 본글 요약</h3>
+  {_ul(summary_bullets)}
 </div>
 """.strip()
 
-    return html
+    # 경고/체크리스트를 섹션3 아래에 합쳐서 붙이고 싶으면(선택)
+    extra_guide = ""
+    if warning_bullets:
+        extra_guide += _h2("주의할 점")
+        extra_guide += _ul(warning_bullets)
+    if checklist_bullets:
+        extra_guide += _h2("바로 실행 체크리스트")
+        extra_guide += _ul(checklist_bullets)
+
+    # 본문 구성(요청하신 순서 고정)
+    html_out = f"""
+<!-- wp:html -->
+{css}
+<div class="wrap">
+  <h1 class="title">{_escape(title)}</h1>
+  <div class="meta">카테고리/형식 분리 · 키워드: <span class="hl">{_escape(keyword)}</span></div>
+
+  {disclosure_block}
+
+  {_ads_slot("top")}
+
+  {summary_block}
+
+  {_img(hero_url, alt=title)}
+
+  {_h2(sec_title(0))}
+  {_ul(sec_bullets(0))}
+  {''.join(_p(x) for x in sec_body(0))}
+
+  {_h2(sec_title(1))}
+  {_ul(sec_bullets(1))}
+  {''.join(_p(x) for x in sec_body(1))}
+
+  {_ads_slot("mid")}
+
+  {_img(body_url, alt=f"{title} 관련 이미지")}
+
+  {_h2(sec_title(2))}
+  {_ul(sec_bullets(2))}
+  {''.join(_p(x) for x in sec_body(2))}
+
+  {extra_guide}
+
+  {_ads_slot("bottom")}
+
+  {(_p(outro) if outro else "")}
+</div>
+<!-- /wp:html -->
+""".strip()
+
+    return html_out
