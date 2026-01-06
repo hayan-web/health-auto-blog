@@ -1,10 +1,9 @@
-# main.py (UPGRADED FINAL v2 + wp_client patch compatible - copy/paste)
+# main.py (INTEGRATED FINAL - copy/paste)
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
-import html as _html
 import json
 import os
 import random
@@ -92,119 +91,6 @@ def _as_html(x: Any) -> str:
     if isinstance(x, tuple) and len(x) >= 1:
         return x[0] or ""
     return x or ""
-
-
-# -----------------------------
-# CLEANUP: 지시문/코드블럭/프롬프트 흔적 제거
-# -----------------------------
-_CLEAN_PATTERNS = [
-    r"\[제목/구성\s*지시\][\s\S]*?(?=\n\n|$)",
-    r"```[\s\S]*?```",
-    r"^\s*조건을\s*지키며[\s\S]*?(?=\n\n|$)",
-    r"^\s*출력은\s*.*한\s*줄만.*$",
-    r"(single scene|no collage|no watermark|no logos|no brand names|no trademarks|no text|square 1:1)",
-    r"(watercolor illustration|photorealistic|softbox studio lighting|paper texture|title-safe area)",
-]
-
-
-def _clean_text(s: Any) -> str:
-    if not s:
-        return ""
-    out = str(s)
-    for pat in _CLEAN_PATTERNS:
-        out = re.sub(pat, "", out, flags=re.IGNORECASE | re.MULTILINE)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    return out
-
-
-def _normalize_title(title: str) -> str:
-    if not title:
-        return title
-    t = unicodedata.normalize("NFKC", str(title)).strip()
-    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
-
-    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
-    t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
-    t = re.sub(r"\b3040\b", "", t)
-
-    t = re.sub(r"^\s*(대를|을|를)\s*위한\s+", "", t)
-    t = re.sub(r"\s*(대를|을|를)\s*위한\s+", " ", t)
-
-    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
-    t = re.sub(r"\s{2,}", " ", t).strip()
-    return t or str(title).strip()
-
-
-def _clean_post_payload(post: dict) -> dict:
-    if not isinstance(post, dict):
-        return post
-
-    if "title" in post:
-        post["title"] = _normalize_title(_clean_text(post.get("title", "")))
-
-    for k in ("summary_bullets", "warning_bullets", "checklist_bullets"):
-        v = post.get(k)
-        if isinstance(v, list):
-            post[k] = [_clean_text(x) for x in v if _clean_text(x)]
-        elif isinstance(v, str):
-            post[k] = [_clean_text(v)] if _clean_text(v) else []
-
-    if "outro" in post:
-        post["outro"] = _clean_text(post.get("outro", ""))
-
-    secs = post.get("sections")
-    if isinstance(secs, list):
-        new_secs = []
-        for sec in secs:
-            if not isinstance(sec, dict):
-                continue
-            h = _clean_text(sec.get("heading", "") or sec.get("title", ""))
-            b = _clean_text(sec.get("body", "") or sec.get("content", ""))
-            if h or b:
-                sec2 = dict(sec)
-                if "heading" in sec2:
-                    sec2["heading"] = h
-                if "title" in sec2:
-                    sec2["title"] = h
-                if "body" in sec2:
-                    sec2["body"] = b
-                if "content" in sec2:
-                    sec2["content"] = b
-                new_secs.append(sec2)
-        post["sections"] = new_secs
-
-    return post
-
-
-def _clean_html(html: str) -> str:
-    if not html:
-        return ""
-    out = str(html)
-    out = re.sub(r"```[\s\S]*?```", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    return out
-
-
-# -----------------------------
-# HTML FIX: 이중 이스케이프(&lt;...&gt;) / || 찌꺼기 제거
-# -----------------------------
-def _fix_escaped_html(html: str) -> str:
-    if not html:
-        return ""
-
-    out = str(html)
-
-    # 1) 스샷에서 보인 '||<a ...' 같은 찌꺼기 라인 제거
-    out = re.sub(r"(?m)^\s*\|\|+", "", out)
-
-    # 2) 쿠팡/CTA 링크가 엔티티로 들어간 경우 자동 복원
-    if ("&lt;a" in out and "href=" in out) or ("&lt;div" in out and "coupang" in out):
-        out = _html.unescape(out)
-
-    # 3) 혹시 남는 '||' 조각(문장 중간) 정리
-    out = out.replace("||", "")
-
-    return out
 
 
 # -----------------------------
@@ -300,8 +186,26 @@ def _in_time_window(slot: str) -> bool:
 
 
 # -----------------------------
-# TITLE DEDUPE
+# TITLE (유사도 강력 방지 + 제목만 재작성)
 # -----------------------------
+def _normalize_title(title: str) -> str:
+    if not title:
+        return title
+    t = unicodedata.normalize("NFKC", str(title)).strip()
+    t = t.replace("ㅡ", "-").replace("–", "-").replace("—", "-").replace("~", "-")
+
+    t = re.sub(r"\b\d{2}\s*[-~]\s*\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
+    t = re.sub(r"\b\d{2}\s*대(를|을|의|에게|용)?\b", "", t)
+    t = re.sub(r"\b3040\b", "", t)
+
+    t = re.sub(r"^\s*(대를|을|를)\s*위한\s+", "", t)
+    t = re.sub(r"\s*(대를|을|를)\s*위한\s+", " ", t)
+
+    t = re.sub(r"^[\s\-\–\—\d\.\)\(]+", "", t).strip()
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t or str(title).strip()
+
+
 def _tokenize_ko(text: str) -> set[str]:
     t = re.sub(r"[^0-9A-Za-z가-힣\s]", " ", text)
     t = re.sub(r"\s+", " ", t).strip()
@@ -413,7 +317,6 @@ def make_ascii_filename(prefix: str, ext: str = "png") -> str:
 def _fallback_png_bytes(text: str) -> bytes:
     try:
         from PIL import Image, ImageDraw, ImageFont  # type: ignore
-
         img = Image.new("RGB", (1024, 1024), (245, 245, 245))
         draw = ImageDraw.Draw(img)
         try:
@@ -496,7 +399,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
 
 
 # -----------------------------
-# COUPANG
+# COUPANG: 키워드 -> 딥링크 3개 자동 생성
 # -----------------------------
 def _coupang_make_auth(method: str, path: str, query: str, access_key: str, secret_key: str) -> str:
     signed_date = datetime.utcnow().strftime("%y%m%dT%H%M%SZ")
@@ -565,81 +468,161 @@ def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
     return []
 
 
-def _insert_disclosure_top(html: str) -> str:
+# -----------------------------
+# COUPANG BLOCK (Gutenberg - 안정적 렌더링)
+# -----------------------------
+def _coupang_disclosure_block() -> str:
     disclosure_text = _env(
         "COUPANG_DISCLOSURE_TEXT",
         "이 포스팅은 쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받을 수 있습니다.",
     )
-    disclosure = (
-        '<div class="disclosure">'
-        f"<p><b>광고 안내</b><br/>{disclosure_text}</p>"
-        "</div>"
-    )
-    if '<div class="wrap">' in html:
-        return html.replace('<div class="wrap">', f'<div class="wrap">\n{disclosure}', 1)
-    return disclosure + "\n" + html
+    # Group + paragraph (inline style 최소화)
+    return f"""
+<!-- wp:group {{"className":"coupang-disclosure"}} -->
+<div class="wp-block-group coupang-disclosure"><!-- wp:paragraph -->
+<p><strong>광고 안내</strong><br>{disclosure_text}</p>
+<!-- /wp:paragraph --></div>
+<!-- /wp:group -->
+""".strip()
 
 
-def _render_coupang_links_block(links: List[Tuple[str, str]], keyword: str) -> str:
+def _coupang_buttons_block(links: List[Tuple[str, str]]) -> str:
+    if not links:
+        return ""
+    # wp 버튼 3개
+    btns = []
+    for label, url in links[:3]:
+        text = "쿠팡에서 바로보기" if label == "바로보기" else ("추천 옵션 보기" if label == "추천" else "할인/쿠폰 확인")
+        btns.append(f"""
+<!-- wp:button {{"className":"is-style-fill"}} -->
+<div class="wp-block-button is-style-fill">
+  <a class="wp-block-button__link wp-element-button" href="{url}" target="_blank" rel="nofollow sponsored noopener">{text}</a>
+</div>
+<!-- /wp:button -->
+""".strip())
+
+    return f"""
+<!-- wp:group -->
+<div class="wp-block-group"><!-- wp:heading {{"level":3}} -->
+<h3>쿠팡에서 조건 빠르게 확인</h3>
+<!-- /wp:heading -->
+
+<!-- wp:buttons -->
+<div class="wp-block-buttons">
+{chr(10).join(btns)}
+</div>
+<!-- /wp:buttons --></div>
+<!-- /wp:group -->
+""".strip()
+
+
+def _coupang_cards_block(links: List[Tuple[str, str]], keyword: str) -> str:
+    """
+    카드 느낌은 컬럼 + 그룹으로 구현 (테마에서 기본 폭/반응형 처리)
+    """
     if not links:
         return ""
 
-    def _one(label: str, url: str) -> str:
-        return f'<li><a href="{url}" target="_blank" rel="nofollow sponsored noopener">{label}</a></li>'
+    cols = []
+    for label, url in links[:3]:
+        title = "바로보기" if label == "바로보기" else ("추천" if label == "추천" else "할인")
+        desc = "관련 상품을 빠르게 확인해요." if label == "바로보기" else ("후기 많은 옵션을 먼저 보세요." if label == "추천" else "쿠폰/할인 적용을 확인해요.")
+        btn_text = "지금 확인" if label == "바로보기" else ("추천 보기" if label == "추천" else "할인 확인")
 
-    items = "\n".join(_one(label, url) for label, url in links[:3])
+        cols.append(f"""
+<!-- wp:column -->
+<div class="wp-block-column">
+  <!-- wp:group {{"className":"coupang-card"}} -->
+  <div class="wp-block-group coupang-card">
+    <!-- wp:paragraph -->
+    <p><strong>{title}</strong><br>{desc}</p>
+    <!-- /wp:paragraph -->
+
+    <!-- wp:buttons -->
+    <div class="wp-block-buttons">
+      <!-- wp:button -->
+      <div class="wp-block-button">
+        <a class="wp-block-button__link wp-element-button" href="{url}" target="_blank" rel="nofollow sponsored noopener">{btn_text}</a>
+      </div>
+      <!-- /wp:button -->
+    </div>
+    <!-- /wp:buttons -->
+  </div>
+  <!-- /wp:group -->
+</div>
+<!-- /wp:column -->
+""".strip())
 
     return f"""
-<div class="coupang-box">
-  <h3>🛒 ‘{keyword}’ 쿠팡 빠른 확인</h3>
-  <ul>
-    {items}
-  </ul>
-  <p style="margin-top:8px;font-size:12px;opacity:0.75;">
-    ※ 가격/쿠폰/배송은 시점에 따라 변동될 수 있습니다.
-  </p>
+<!-- wp:group -->
+<div class="wp-block-group">
+  <!-- wp:heading {{"level":3}} -->
+  <h3>‘{keyword}’ 관련 쿠팡 빠른 확인</h3>
+  <!-- /wp:heading -->
+
+  <!-- wp:columns -->
+  <div class="wp-block-columns">
+    {chr(10).join(cols)}
+  </div>
+  <!-- /wp:columns -->
+
+  <!-- wp:paragraph -->
+  <p><em>※ 가격/쿠폰/배송은 시점에 따라 변동될 수 있습니다.</em></p>
+  <!-- /wp:paragraph -->
 </div>
+<!-- /wp:group -->
 """.strip()
 
 
-def _render_coupang_cta(url: str, *, variant: str) -> str:
-    if variant == "top":
-        text = "쿠팡에서 조건 보기 →"
-    elif variant == "mid":
-        text = "할인/옵션 확인하기 →"
-    else:
-        text = "가격/배송 확인하기 →"
-
-    return f"""
-<div class="coupang-cta">
-  <p><a href="{url}" target="_blank" rel="nofollow sponsored noopener">{text}</a></p>
-</div>
-""".strip()
+# -----------------------------
+# HTML INSERT (pre/code 안쪽 회피)
+# -----------------------------
+def _count_tags_before(html: str, pos: int, open_pat: str, close_pat: str) -> tuple[int, int]:
+    opens = len(re.findall(open_pat, html[:pos], flags=re.I))
+    closes = len(re.findall(close_pat, html[:pos], flags=re.I))
+    return opens, closes
 
 
-def _insert_after_first_ul(html: str, block: str) -> str:
+def _is_inside_code_like(html: str, pos: int) -> bool:
+    pre_o, pre_c = _count_tags_before(html, pos, r"<pre\b", r"</pre>")
+    code_o, code_c = _count_tags_before(html, pos, r"<code\b", r"</code>")
+    return (pre_o > pre_c) or (code_o > code_c)
+
+
+def _insert_after_first_ul_safe(html: str, block: str) -> str:
     if not block:
         return html
 
-    idx = html.find("</ul>")
-    if idx != -1:
-        return html[: idx + 5] + "\n" + block + "\n" + html[idx + 5 :]
+    start = 0
+    while True:
+        idx = html.find("</ul>", start)
+        if idx == -1:
+            # ul이 없으면 상단에 붙임
+            return block + "\n" + html
+        insert_pos = idx + 5
+        if not _is_inside_code_like(html, insert_pos):
+            return html[:insert_pos] + "\n" + block + "\n" + html[insert_pos:]
+        start = insert_pos
 
-    pidx = html.lower().find("</p>")
-    if pidx != -1:
-        return html[: pidx + 4] + "\n" + block + "\n" + html[pidx + 4 :]
 
-    return block + "\n" + html
-
-
-def _insert_near_middle(html: str, block: str) -> str:
+def _insert_near_second_h2_safe(html: str, block: str) -> str:
     if not block:
         return html
     hs = [m.start() for m in re.finditer(r"<h2\b", html, re.I)]
+    candidates = []
     if len(hs) >= 2:
-        pos = hs[1]
-        return html[:pos] + block + "\n" + html[pos:]
+        candidates.append(hs[1])
+    if hs:
+        candidates.append(hs[-1])
+
+    for pos in candidates:
+        if not _is_inside_code_like(html, pos):
+            return html[:pos] + "\n" + block + "\n" + html[pos:]
+
+    # fallback: 가운데(단, code/pre 안이면 조금 뒤로)
     pos = max(0, len(html) // 2)
+    if _is_inside_code_like(html, pos):
+        pos = min(len(html), pos + 2000)
     return html[:pos] + "\n" + block + "\n" + html[pos:]
 
 
@@ -667,6 +650,7 @@ def run() -> None:
 
     history = state.get("history", []) if isinstance(state.get("history", []), list) else []
 
+    # Guardrails
     cfg = GuardConfig(
         max_posts_per_day=int(getattr(S, "MAX_POSTS_PER_DAY", 3)),
         max_usd_per_month=float(getattr(S, "MAX_USD_PER_MONTH", 30.0)),
@@ -680,31 +664,38 @@ def run() -> None:
     else:
         check_limits_or_raise(state, cfg)
 
+    # slot/topic
     forced_slot, topic = _pick_run_topic(state)
     print(f"🕒 run_id={run_id} | event={event_name} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
 
+    # ✅ 시간창 강제는 스케줄에서만
     if _env("RUN_SLOT", "").lower() in ("health", "trend", "life"):
         if is_schedule and _env_bool("ENFORCE_TIME_WINDOW", "1"):
             if not _in_time_window(forced_slot):
                 print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit(0)")
                 return
 
+    # ✅ 같은 슬롯 중복 방지: 스케줄에서만
     if is_schedule and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
         if _already_ran_this_slot(state, forced_slot):
             print(f"🛑 same slot already ran today: {forced_slot} → exit(0)")
             return
 
+    # mark run
     state = _mark_ran_this_slot(state, forced_slot, run_id)
     save_state(state)
 
+    # keyword
     keyword, _ = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
 
+    # life subtopic
     life_subtopic = ""
     if topic == "life":
         life_subtopic, sub_dbg = pick_life_subtopic(state)
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
 
+    # angle
     seed = _stable_seed_int(keyword, run_id, str(int(time.time())))
     angle = _title_angle(topic, seed)
 
@@ -739,8 +730,6 @@ def run() -> None:
     post, _ = quality_retry_loop(_gen, max_retry=3)
     post["title"] = _normalize_title(post.get("title", ""))
 
-    post = _clean_post_payload(post)
-
     for _ in range(2):
         t = post.get("title", "")
         if (not t) or len(t) < 8 or _title_too_similar(t, recent):
@@ -757,11 +746,10 @@ def run() -> None:
         else:
             break
 
-    post = _clean_post_payload(post)
-
     thumb_title = generate_thumbnail_title(openai_client, S.OPENAI_MODEL, post["title"])
     print("🧩 thumb_title:", thumb_title, "| thumb_variant:", thumb_variant)
 
+    # 쿠팡: life만 (env로 끄기 가능)
     coupang_planned = bool(topic == "life" and _env_bool("FORCE_COUPANG_IN_LIFE", "1"))
 
     forced_style_mode = ""
@@ -829,6 +817,7 @@ def run() -> None:
         )
     )
 
+    # ✅ COUPANG: "블록 방식"으로 안정 삽입 (코드 튀어나옴 방지)
     coupang_inserted = False
     coupang_urls: List[Tuple[str, str]] = []
 
@@ -836,29 +825,27 @@ def run() -> None:
         coupang_urls = _coupang_links_from_keyword(keyword)
 
         if coupang_urls:
-            html = _insert_disclosure_top(html)
+            disclosure = _coupang_disclosure_block()
+            cards = _coupang_cards_block(coupang_urls, keyword=keyword)
+            buttons = _coupang_buttons_block(coupang_urls)
 
-            links_block = _render_coupang_links_block(coupang_urls, keyword=keyword)
-            primary_url = coupang_urls[0][1]
-            cta_top = _render_coupang_cta(primary_url, variant="top")
-            cta_mid = _render_coupang_cta(primary_url, variant="mid")
-            cta_bot = _render_coupang_cta(primary_url, variant="bottom")
+            # 상단: 대가성 문구 + 카드
+            html = disclosure + "\n" + html
+            html = _insert_after_first_ul_safe(html, cards)
 
-            html = _insert_after_first_ul(html, links_block + "\n" + cta_top)
-            html = _insert_near_middle(html, cta_mid)
-            html = _insert_end(html, cta_bot)
+            # 중간: 버튼 3개(가장 안정적으로 클릭 유도)
+            html = _insert_near_second_h2_safe(html, buttons)
+
+            # 하단: 버튼 1회 더(리마인드)
+            html = _insert_end(html, buttons)
 
             coupang_inserted = True
-            print("🛒 coupang injected: links(3) + CTA(3)")
+            print("🛒 coupang injected: disclosure + cards + buttons(mid+bottom)")
         else:
             print("⚠️ coupang planned BUT deeplink generation failed → skip coupang for this post")
 
+    # adsense
     html = _as_html(inject_adsense_slots(html))
-
-    # ✅ 최종 살균/복원 (쿠팡 코딩 튀어나옴 방지 핵심)
-    html = _clean_html(html)
-    html = _fix_escaped_html(html)
-
     post["content_html"] = html
 
     post_id = publish_to_wp(
@@ -867,6 +854,7 @@ def run() -> None:
         featured_media_id=hero_media_id,
     )
 
+    # stats
     state = record_image_impression(state, image_style_for_stats)
     state = update_image_score(state, image_style_for_stats)
     state = record_topic_style_impression(state, topic, image_style_for_stats)
