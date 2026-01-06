@@ -1,9 +1,10 @@
 import base64
+from typing import Tuple, Optional
+
 import requests
-from typing import Tuple
 
 
-def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png"):
+def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png") -> Tuple[str, str]:
     if not data:
         return "application/octet-stream", fallback_ext
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -15,36 +16,136 @@ def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png"):
     return "application/octet-stream", fallback_ext
 
 
-def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes: bytes, file_name: str):
-    """WordPress REST API로 미디어 업로드.
-    - 이미지 bytes의 매직바이트로 MIME을 감지해 Content-Type을 맞춥니다.
-    - 파일 확장자도 MIME에 맞게 자동 보정합니다.
-    """
-    auth = base64.b64encode(f"{username}:{app_password}".encode("utf-8")).decode("utf-8")
-    mime, ext = _sniff_image_mime_and_ext(img_bytes, fallback_ext="png")
-
-    # file_name 확장자 보정
+def _force_filename_ext(file_name: str, ext: str) -> str:
     if file_name:
         base = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
-        file_name = f"{base}.{ext}"
-    else:
-        file_name = f"image.{ext}"
+        return f"{base}.{ext}"
+    return f"image.{ext}"
 
-    headers = {
+
+def _try_convert_to_png(img_bytes: bytes) -> Optional[bytes]:
+    """서버가 WEBP 등을 거부할 때를 대비한 PNG 변환(가능하면). 실패하면 None."""
+    try:
+        from io import BytesIO
+        from PIL import Image  # type: ignore
+
+        im = Image.open(BytesIO(img_bytes))
+        im = im.convert("RGBA") if im.mode in ("P", "LA", "RGBA") else im.convert("RGB")
+
+        buf = BytesIO()
+        im.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def upload_media_to_wp(
+    wp_url: str,
+    username: str,
+    app_password: str,
+    img_bytes: bytes,
+    file_name: str,
+):
+    """
+    WordPress REST API로 미디어 업로드(✅ 415 방지 버전)
+    - 1차: multipart/form-data(files=...) 업로드 (대부분의 서버/보안설정에서 이 방식만 허용)
+    - 2차: raw bytes 업로드 fallback
+    - 415 발생 + webp면 png 변환 후 재시도
+    """
+    wp_url = (wp_url or "").rstrip("/")
+    if not wp_url:
+        raise RuntimeError("wp_url is empty")
+
+    if not isinstance(img_bytes, (bytes, bytearray)) or not img_bytes:
+        raise RuntimeError("img_bytes is empty or not bytes")
+
+    auth = base64.b64encode(f"{username}:{app_password}".encode("utf-8")).decode("utf-8")
+    media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
+
+    mime, ext = _sniff_image_mime_and_ext(bytes(img_bytes), fallback_ext="png")
+
+    # sniff 실패 시(=octet-stream)라도 서버가 415를 내는 경우가 많아서 png로 강제 시도
+    if mime == "application/octet-stream":
+        mime, ext = "image/png", "png"
+
+    file_name = _force_filename_ext(file_name, ext)
+
+    base_headers = {
         "Authorization": f"Basic {auth}",
-        "Content-Disposition": f'attachment; filename="{file_name}"',
-        "Content-Type": mime,
+        "Accept": "application/json",
+        "User-Agent": "health-auto-blog/1.0",
     }
 
-    wp_url = wp_url.rstrip("/")
-    media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
-    resp = requests.post(media_endpoint, headers=headers, data=img_bytes, timeout=90)
+    def _ok(resp: requests.Response) -> bool:
+        return resp.status_code in (200, 201)
 
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"Media upload failed: {resp.status_code} {resp.text[:500]}")
+    # ---------------------------
+    # 1) multipart 업로드 (권장/기본)
+    # ---------------------------
+    try:
+        files = {"file": (file_name, bytes(img_bytes), mime)}
+        resp = requests.post(media_endpoint, headers=base_headers, files=files, timeout=90)
 
-    j = resp.json()
-    return j.get("source_url"), j.get("id")
+        if _ok(resp):
+            j = resp.json()
+            return j.get("source_url"), j.get("id")
+
+        # 415 + webp → png 변환 후 multipart 재시도
+        if resp.status_code == 415 and mime == "image/webp":
+            png = _try_convert_to_png(bytes(img_bytes))
+            if png:
+                files = {"file": (_force_filename_ext(file_name, "png"), png, "image/png")}
+                resp2 = requests.post(media_endpoint, headers=base_headers, files=files, timeout=90)
+                if _ok(resp2):
+                    j = resp2.json()
+                    return j.get("source_url"), j.get("id")
+
+        # multipart 실패 시 raw로 fallback
+        last_status = resp.status_code
+        last_text = (resp.text or "")[:500]
+    except Exception as e:
+        last_status = -1
+        last_text = f"multipart exception: {e}"
+
+    # ---------------------------
+    # 2) raw bytes 업로드 (fallback)
+    # ---------------------------
+    try:
+        headers_raw = dict(base_headers)
+        headers_raw.update(
+            {
+                "Content-Disposition": f'attachment; filename="{file_name}"',
+                "Content-Type": mime,
+            }
+        )
+        resp = requests.post(media_endpoint, headers=headers_raw, data=bytes(img_bytes), timeout=90)
+
+        if _ok(resp):
+            j = resp.json()
+            return j.get("source_url"), j.get("id")
+
+        # 415 + webp → png 변환 후 raw 재시도
+        if resp.status_code == 415 and mime == "image/webp":
+            png = _try_convert_to_png(bytes(img_bytes))
+            if png:
+                headers_raw.update(
+                    {
+                        "Content-Disposition": f'attachment; filename="{_force_filename_ext(file_name, "png")}"',
+                        "Content-Type": "image/png",
+                    }
+                )
+                resp2 = requests.post(media_endpoint, headers=headers_raw, data=png, timeout=90)
+                if _ok(resp2):
+                    j = resp2.json()
+                    return j.get("source_url"), j.get("id")
+
+        raise RuntimeError(f"Media upload failed: {resp.status_code} {((resp.text or '')[:500])}")
+    except Exception as e:
+        raise RuntimeError(
+            "Media upload failed.\n"
+            f"- multipart last: {last_status} {last_text}\n"
+            f"- raw error: {e}"
+        )
 
 
 def publish_to_wp(
@@ -58,13 +159,12 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    - data["content_html"]이 있으면 그걸 그대로 사용 (✅ 여기서 HTML을 절대 escape 하지 않음)
+    - publish_to_wp는 data["content_html"]이 있으면 그걸 그대로 사용
     - 없으면 기존 content 기반으로 기본 HTML 구성
     """
     wp_url = wp_url.rstrip("/")
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
-    # ✅ main.py에서 완성 HTML을 content_html로 넘기면 그걸 우선 사용
     if data.get("content_html"):
         final_html = data["content_html"]
     else:
