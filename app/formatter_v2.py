@@ -1,92 +1,51 @@
 # app/formatter_v2.py
 from __future__ import annotations
 
-import html
 import re
 from typing import Any, Dict, List, Optional
 
 
-def _env(key: str, default: str = "") -> str:
-    import os
-    return (os.getenv(key) or default).strip()
-
-
-def _escape(s: str) -> str:
-    return html.escape(s or "", quote=False)
-
-
-def _inline_markup(text: str) -> str:
-    """
-    - 모델이 본문에서 **강조** 를 쓰면 -> 색/굵기 span으로 변환
-    - 나머지는 안전하게 escape
-    """
-    raw = text or ""
-    esc = _escape(raw)
-
-    # **bold** -> highlight
-    esc = re.sub(
-        r"\*\*(.+?)\*\*",
-        r"<span class='hl'>\1</span>",
-        esc,
-        flags=re.DOTALL,
-    )
-    return esc
-
-
-def _ads_slot(slot: str) -> str:
-    """
-    수동 광고 코드(애드센스)를 env로 넣고 싶으면:
-      ADSENSE_MANUAL_TOP / MID / BOTTOM
-    가 비어있으면 슬롯 마커만 남겨둠(나중에 치환 가능).
-    """
-    mapping = {
-        "top": _env("ADSENSE_MANUAL_TOP", ""),
-        "mid": _env("ADSENSE_MANUAL_MID", ""),
-        "bottom": _env("ADSENSE_MANUAL_BOTTOM", ""),
-    }
-    code = mapping.get(slot, "")
-    if code:
-        return f"<div class='ad ad-{slot}'>{code}</div>"
-    return f"<!-- ADSENSE:{slot.upper()} -->"
-
-
-def _h2(title: str) -> str:
-    return f"""
-<h2 class="sec-title">
-  <span>{_escape(title)}</span>
-</h2>
-""".strip()
-
-
-def _p(text: str) -> str:
-    t = (text or "").strip()
-    if not t:
+def _escape_html(s: str) -> str:
+    if s is None:
         return ""
-    return f"<p class='para'>{_inline_markup(t)}</p>"
+    s = str(s)
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return s
 
 
-def _ul(items: Optional[List[str]]) -> str:
-    if not items:
-        return ""
-    lis = []
-    for it in items:
-        it = (it or "").strip()
-        if not it:
+def _build_highlighter(terms: List[str], max_hits_total: int = 24):
+    """
+    terms에 포함된 단어를 <span class="hl">로 감싸 강조합니다.
+    너무 과도해지지 않도록 전체 히트 수 제한.
+    """
+    terms = [t.strip() for t in terms if isinstance(t, str) and t.strip()]
+    # 너무 짧은 글자/중복 제거
+    uniq: List[str] = []
+    for t in terms:
+        if len(t) < 2:
             continue
-        lis.append(f"<li>{_inline_markup(it)}</li>")
-    if not lis:
-        return ""
-    return "<ul class='bullets'>" + "\n".join(lis) + "</ul>"
+        if t not in uniq:
+            uniq.append(t)
+    if not uniq:
+        return lambda x: x
 
+    # 긴 단어 우선 매칭
+    uniq.sort(key=len, reverse=True)
+    pat = re.compile("(" + "|".join(map(re.escape, uniq)) + ")")
 
-def _img(url: str, alt: str = "") -> str:
-    if not url:
-        return ""
-    return f"""
-<div class="img-wrap">
-  <img src="{_escape(url)}" alt="{_escape(alt)}" loading="lazy" />
-</div>
-""".strip()
+    hit = {"n": 0}
+
+    def apply(text: str) -> str:
+        if not text:
+            return ""
+        def repl(m):
+            if hit["n"] >= max_hits_total:
+                return m.group(0)
+            hit["n"] += 1
+            return f'<span class="hl">{m.group(0)}</span>'
+        return pat.sub(repl, text)
+
+    return apply
 
 
 def format_post_v2(
@@ -101,124 +60,297 @@ def format_post_v2(
     warning_bullets: Optional[List[str]] = None,
     checklist_bullets: Optional[List[str]] = None,
     outro: str = "",
+    highlight_terms: Optional[List[str]] = None,
+    # ✅ 쿠팡/추가 블록을 “HTML로” 주입(본문에 코드 튀는 문제 방지)
+    extra_top_html: str = "",
+    extra_mid_html: str = "",
+    extra_bottom_html: str = "",
 ) -> str:
-    """
-    sections 예시:
-      [{"title":"...", "body":["문단1","문단2"], "bullets":["...","..."]}, ...]
-    """
+    title = (title or "").strip()
+    keyword = (keyword or "").strip()
+
+    summary_bullets = summary_bullets or []
     sections = sections or []
-    # 최소 3개 섹션으로 맞추기(없으면 빈 값 채워서라도 틀 유지)
-    while len(sections) < 3:
-        sections.append({"title": "", "body": [], "bullets": []})
+    warning_bullets = warning_bullets or []
+    checklist_bullets = checklist_bullets or []
 
-    # 섹션 정리
-    def sec_title(i: int) -> str:
-        t = (sections[i].get("title") or "").strip()
-        if t:
-            return t
-        # 제목이 비면 키워드 기반 기본값
-        base = ["핵심 정리", "실전 팁", "체크리스트/주의점"]
-        return f"{keyword} {base[i] if i < len(base) else '정리'}".strip()
+    # highlight terms: AI가 준 값 우선, 없으면 키워드 토큰 일부 사용
+    ht = []
+    if highlight_terms:
+        ht = [x for x in highlight_terms if isinstance(x, str)]
+    if not ht:
+        ht = [t for t in re.split(r"\s+", keyword) if len(t) >= 2][:6]
 
-    def sec_body(i: int) -> List[str]:
-        b = sections[i].get("body")
-        if isinstance(b, list):
-            return [str(x) for x in b if str(x).strip()]
-        # 문자열로 오는 케이스 방어
-        if isinstance(b, str) and b.strip():
-            return [b.strip()]
-        return []
+    highlighter = _build_highlighter(ht, max_hits_total=22)
 
-    def sec_bullets(i: int) -> List[str]:
-        bl = sections[i].get("bullets")
-        if isinstance(bl, list):
-            return [str(x) for x in bl if str(x).strip()]
-        return []
+    def P(text: str) -> str:
+        t = _escape_html(text)
+        t = highlighter(t)
+        return f"<p class='p'>{t}</p>"
 
-    # 스타일(CSS)
-    css = """
-<style>
-  .wrap { max-width: 760px; margin: 0 auto; padding: 18px 14px; font-family: 'Malgun Gothic','Apple SD Gothic Neo',sans-serif; line-height: 1.8; color:#111827; }
-  h1.title { font-size: 30px; font-weight: 900; margin: 6px 0 14px; letter-spacing:-0.4px; }
-  .meta { color:#6b7280; font-size:13px; margin-bottom:12px; }
-  .sec-title { margin: 22px 0 10px; padding: 10px 12px; border-left: 6px solid #111827; background: #f3f4f6; border-radius: 10px; font-size: 18px; font-weight: 900; }
-  .para { margin: 0 0 12px; font-size: 16px; }
-  .bullets { margin: 10px 0 16px 18px; }
-  .bullets li { margin: 6px 0; }
-  .img-wrap { margin: 16px 0; }
-  .img-wrap img { width: 100%; border-radius: 14px; box-shadow: 0 6px 18px rgba(0,0,0,0.10); display:block; }
-  .summary { background:#ecfeff; border:1px solid #a5f3fc; border-radius:14px; padding:14px 14px; margin: 12px 0 16px; }
-  .summary h3 { margin: 0 0 8px; font-size: 16px; font-weight: 900; }
-  .disclosure { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; border-radius:14px; padding:12px 14px; margin: 10px 0 14px; }
-  .disclosure strong { font-weight: 900; }
-  .hl { color:#0ea5e9; font-weight: 900; }
-  .ad { margin: 18px 0; padding: 10px; border: 1px dashed #e5e7eb; border-radius: 12px; background:#fff; }
-</style>
-""".strip()
+    def LI(text: str) -> str:
+        t = _escape_html(text)
+        t = highlighter(t)
+        return f"<li>{t}</li>"
 
-    # 상단 대가성 문구(있으면)
-    disclosure_block = ""
-    if disclosure_html:
-        disclosure_block = f"<div class='disclosure'>{disclosure_html}</div>"
+    # sections normalize
+    norm_sections: List[Dict[str, Any]] = []
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        h2 = (s.get("h2") or s.get("title") or "").strip()
+        paras = s.get("paras") or s.get("paragraphs") or []
+        bullets = s.get("bullets") or []
+        if isinstance(paras, str):
+            paras = [paras]
+        if isinstance(bullets, str):
+            bullets = [bullets]
+        norm_sections.append({"h2": h2, "paras": paras, "bullets": bullets})
 
-    # 요약 블록
-    summary_block = ""
+    # ✅ 요청하신 글 순서
+    # 1. 제목
+    # 2. 에드센스 수동광고
+    # 3. 본글 요약
+    # 4. 이미지
+    # 5. 소제목/본문1
+    # 7. 소제목/본문2
+    # 9. 에드센스 수동광고
+    # 10. 소제목/본문3
+    # 12. 에드센스 수동광고
+    # (쿠팡글도 이 틀을 크게 벗어나지 않게 extra_* 로 끼워 넣음)
+
+    # Ads placeholders (수동광고)
+    ADS_TOP = "<div class='ad ad-top'>[ADSENSE_MANUAL_TOP]</div>"
+    ADS_MID = "<div class='ad ad-mid'>[ADSENSE_MANUAL_MID]</div>"
+    ADS_BOT = "<div class='ad ad-bot'>[ADSENSE_MANUAL_BOT]</div>"
+
+    # Summary box
+    summary_html = ""
     if summary_bullets:
-        summary_block = f"""
-<div class="summary">
-  <h3>✅ 본글 요약</h3>
-  {_ul(summary_bullets)}
+        summary_html = f"""
+<div class="box box-summary">
+  <div class="box-title">요약</div>
+  <ul class="ul">
+    {''.join(LI(x) for x in summary_bullets[:6])}
+  </ul>
 </div>
 """.strip()
 
-    # 경고/체크리스트를 섹션3 아래에 합쳐서 붙이고 싶으면(선택)
-    extra_guide = ""
+    # Disclosure
+    disclosure_block = ""
+    if disclosure_html:
+        disclosure_block = f"""
+<div class="box box-disclosure">
+  {disclosure_html}
+</div>
+""".strip()
+
+    # Images
+    hero_img = ""
+    if hero_url:
+        hero_img = f"""
+<div class="img-wrap">
+  <img src="{_escape_html(hero_url)}" alt="{_escape_html(title)}" />
+</div>
+""".strip()
+
+    body_img = ""
+    if body_url:
+        body_img = f"""
+<div class="img-wrap">
+  <img src="{_escape_html(body_url)}" alt="{_escape_html(title)} 관련 이미지" />
+</div>
+""".strip()
+
+    def render_section(sec: Dict[str, Any]) -> str:
+        h2 = sec.get("h2") or ""
+        paras = sec.get("paras") or []
+        bullets = sec.get("bullets") or []
+        h2_html = ""
+        if h2:
+            h2_html = f"<h2 class='h2'>{_escape_html(h2)}</h2>"
+        paras_html = "".join(P(x) for x in paras if isinstance(x, str) and x.strip())
+        bullets_html = ""
+        bl = [x for x in bullets if isinstance(x, str) and x.strip()]
+        if bl:
+            bullets_html = f"<ul class='ul'>{''.join(LI(x) for x in bl[:8])}</ul>"
+        return f"<section class='sec'>{h2_html}{paras_html}{bullets_html}</section>"
+
+    # pick up to 3 sections
+    s1 = norm_sections[0] if len(norm_sections) >= 1 else {"h2": "핵심 정리", "paras": [], "bullets": []}
+    s2 = norm_sections[1] if len(norm_sections) >= 2 else {"h2": "실전 팁", "paras": [], "bullets": []}
+    s3 = norm_sections[2] if len(norm_sections) >= 3 else {"h2": "체크 포인트", "paras": [], "bullets": []}
+
+    # Warning/Checklist/Outro (원하면 섹션 뒤에 붙여도 됨)
+    extra_boxes = ""
     if warning_bullets:
-        extra_guide += _h2("주의할 점")
-        extra_guide += _ul(warning_bullets)
+        extra_boxes += f"""
+<div class="box box-warn">
+  <div class="box-title">주의할 점</div>
+  <ul class="ul">{''.join(LI(x) for x in warning_bullets[:8])}</ul>
+</div>
+""".strip()
     if checklist_bullets:
-        extra_guide += _h2("바로 실행 체크리스트")
-        extra_guide += _ul(checklist_bullets)
+        extra_boxes += f"""
+<div class="box box-check">
+  <div class="box-title">오늘의 체크리스트</div>
+  <ul class="ul">{''.join(LI(x) for x in checklist_bullets[:10])}</ul>
+</div>
+""".strip()
+    if outro:
+        extra_boxes += f"<div class='outro'>{P(outro)}</div>"
 
-    # 본문 구성(요청하신 순서 고정)
-    html_out = f"""
+    # ✅ 전체 HTML (WordPress가 “그대로” 렌더하도록 HTML 블록 하나로 묶음)
+    html = f"""
 <!-- wp:html -->
-{css}
-<div class="wrap">
-  <h1 class="title">{_escape(title)}</h1>
-  <div class="meta">카테고리/형식 분리 · 키워드: <span class="hl">{_escape(keyword)}</span></div>
+<div class="post-wrap">
 
-  {disclosure_block}
+<style>
+.post-wrap {{
+  max-width: 860px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo","Malgun Gothic", Arial, sans-serif;
+  line-height: 1.85;
+  color: #111827;
+}}
+.post-title {{
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  margin: 10px 0 14px;
+}}
+.ad {{
+  border: 1px dashed #cbd5e1;
+  border-radius: 14px;
+  padding: 18px;
+  margin: 16px 0;
+  background: #f8fafc;
+  text-align: center;
+  color: #64748b;
+  font-weight: 800;
+}}
+.box {{
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 14px 14px;
+  margin: 16px 0;
+  background: #ffffff;
+}}
+.box-title {{
+  font-weight: 900;
+  margin-bottom: 8px;
+}}
+.box-summary {{ background: #f0f9ff; border-color: #bae6fd; }}
+.box-warn {{ background: #fff7ed; border-color: #fed7aa; }}
+.box-check {{ background: #f0fdf4; border-color: #bbf7d0; }}
+.box-disclosure {{ background: #fff7ed; border-color: #fed7aa; }}
+.h2 {{
+  margin: 24px 0 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #111827;
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 900;
+}}
+.p {{
+  margin: 0 0 14px;
+  font-size: 17px;
+}}
+.ul {{
+  margin: 0;
+  padding-left: 18px;
+}}
+.ul li {{
+  margin: 6px 0;
+  font-size: 16px;
+}}
+.img-wrap {{
+  margin: 18px 0;
+}}
+.img-wrap img {{
+  width: 100%;
+  border-radius: 16px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+}}
+.hl {{
+  color: #0ea5e9; /* 강조 단어 색 */
+  font-weight: 900;
+}}
+.sec {{
+  margin: 6px 0 18px;
+}}
+.outro {{
+  margin-top: 8px;
+}}
+/* 쿠팡 블록 클래스(테마 영향 줄이기 위해 기본만) */
+.coupang-wrap {{
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 14px;
+  background: #f8fafc;
+  margin: 16px 0;
+}}
+.coupang-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}}
+.coupang-card {{
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 12px;
+  background: #ffffff;
+}}
+.coupang-btn {{
+  display: block;
+  text-align: center;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #111827;
+  color: #ffffff !important;
+  text-decoration: none !important;
+  font-weight: 900;
+}}
+.coupang-note {{
+  color: #64748b;
+  font-size: 12px;
+  margin-top: 10px;
+}}
+</style>
 
-  {_ads_slot("top")}
+<div class="post-title">{_escape_html(title)}</div>
 
-  {summary_block}
+{disclosure_block}
 
-  {_img(hero_url, alt=title)}
+{ADS_TOP}
 
-  {_h2(sec_title(0))}
-  {_ul(sec_bullets(0))}
-  {''.join(_p(x) for x in sec_body(0))}
+{summary_html}
 
-  {_h2(sec_title(1))}
-  {_ul(sec_bullets(1))}
-  {''.join(_p(x) for x in sec_body(1))}
+{hero_img}
 
-  {_ads_slot("mid")}
+{extra_top_html}
 
-  {_img(body_url, alt=f"{title} 관련 이미지")}
+{render_section(s1)}
 
-  {_h2(sec_title(2))}
-  {_ul(sec_bullets(2))}
-  {''.join(_p(x) for x in sec_body(2))}
+{body_img}
 
-  {extra_guide}
+{render_section(s2)}
 
-  {_ads_slot("bottom")}
+{ADS_MID}
 
-  {(_p(outro) if outro else "")}
+{extra_mid_html}
+
+{render_section(s3)}
+
+{extra_boxes}
+
+{ADS_BOT}
+
+{extra_bottom_html}
+
 </div>
 <!-- /wp:html -->
 """.strip()
 
-    return html_out
+    return html
