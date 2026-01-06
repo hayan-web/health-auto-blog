@@ -1,13 +1,9 @@
-# app/wp_client.py (PATCHED - copy/paste)
-from __future__ import annotations
-
 import base64
-from typing import Tuple, Optional
-
 import requests
+from typing import Tuple, Optional, List
 
 
-def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png") -> Tuple[str, str]:
+def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png"):
     if not data:
         return "application/octet-stream", fallback_ext
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -19,22 +15,13 @@ def _sniff_image_mime_and_ext(data: bytes, fallback_ext: str = "png") -> Tuple[s
     return "application/octet-stream", fallback_ext
 
 
-def upload_media_to_wp(
-    wp_url: str,
-    username: str,
-    app_password: str,
-    img_bytes: bytes,
-    file_name: str,
-):
+def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes: bytes, file_name: str):
     """
     WordPress REST API로 미디어 업로드.
-    - 이미지 bytes의 매직바이트로 MIME을 감지해 Content-Type을 맞춥니다.
-    - 파일 확장자도 MIME에 맞게 자동 보정합니다.
+    - 이미지 bytes 매직바이트로 MIME 감지 -> Content-Type 정확히 설정 (415 방지)
+    - 파일 확장자도 MIME에 맞게 자동 보정
     """
-    wp_url = (wp_url or "").rstrip("/")
-    if not wp_url:
-        raise RuntimeError("WP_URL이 비어 있습니다.")
-
+    wp_url = wp_url.rstrip("/")
     auth = base64.b64encode(f"{username}:{app_password}".encode("utf-8")).decode("utf-8")
     mime, ext = _sniff_image_mime_and_ext(img_bytes, fallback_ext="png")
 
@@ -72,10 +59,10 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    - main.py에서 완성 HTML을 data["content_html"]로 넘기면 그걸 그대로 사용
-    - 없으면 기존 content 기반으로 기본 HTML 구성
+    ✅ data["content_html"]이 있으면 그대로 발행
+    ✅ data["categories"] (list[int])가 있으면 WP 카테고리 지정
     """
-    wp_url = (wp_url or "").rstrip("/")
+    wp_url = wp_url.rstrip("/")
     api_endpoint = f"{wp_url}/wp-json/wp/v2/posts"
 
     if data.get("content_html"):
@@ -121,6 +108,11 @@ def publish_to_wp(
         "status": "publish",
         "featured_media": featured_media_id,
     }
+
+    # ✅ 카테고리 지정
+    cats = data.get("categories")
+    if isinstance(cats, list) and all(isinstance(x, int) for x in cats):
+        payload["categories"] = cats
 
     print("📝 POST ->", api_endpoint)
     print("📝 title ->", (payload["title"] or "")[:80])
