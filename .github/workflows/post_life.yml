@@ -2,7 +2,7 @@ name: Post Life (19:00 KST)
 
 on:
   schedule:
-    - cron: "0 10 * * *"  # 19:00 KST = 10:00 UTC
+    - cron: "0 10 * * *" # 19:00 KST = 10:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -18,17 +18,17 @@ jobs:
     env:
       RUN_SLOT: life
       STRICT_RUN_SLOT: "1"
+      ENFORCE_TIME_WINDOW: "1"
       SKIP_DUPLICATE_SLOT: "1"
-      ENFORCE_TIME_WINDOW: ${{ github.event_name == 'schedule' && '1' || '0' }}
-      SLOT_WINDOW_MIN: "120"
-      FORCE_COUPANG_IN_LIFE: "1"
+      SLOT_WINDOW_MIN: "90"
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
           cache: "pip"
 
       - name: Install fonts (Korean)
@@ -51,11 +51,8 @@ jobs:
 
       - name: Run script
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-          NAVER_SEED_KEYWORDS_LIFE: "청소꿀팁,정리수납,세탁방법,생활비절약,냉장고정리,다이소꿀템,주방정리,욕실청소"
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
@@ -69,8 +66,9 @@ jobs:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
-          # ✅ life에서 쿠팡 딥링크 자동 생성에 필요
           COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
           COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
           COUPANG_DISCLOSURE_TEXT: ${{ secrets.COUPANG_DISCLOSURE_TEXT }}
+
+          FORCE_COUPANG_IN_LIFE: "1"
         run: python main.py
