@@ -1,3 +1,4 @@
+import base64
 import requests
 from typing import Tuple
 
@@ -19,9 +20,6 @@ def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes:
     - 이미지 bytes의 매직바이트로 MIME을 감지해 Content-Type을 맞춥니다.
     - 파일 확장자도 MIME에 맞게 자동 보정합니다.
     """
-    import base64
-    import requests
-
     auth = base64.b64encode(f"{username}:{app_password}".encode("utf-8")).decode("utf-8")
     mime, ext = _sniff_image_mime_and_ext(img_bytes, fallback_ext="png")
 
@@ -38,6 +36,7 @@ def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes:
         "Content-Type": mime,
     }
 
+    wp_url = wp_url.rstrip("/")
     media_endpoint = f"{wp_url}/wp-json/wp/v2/media"
     resp = requests.post(media_endpoint, headers=headers, data=img_bytes, timeout=90)
 
@@ -46,6 +45,7 @@ def upload_media_to_wp(wp_url: str, username: str, app_password: str, img_bytes:
 
     j = resp.json()
     return j.get("source_url"), j.get("id")
+
 
 def publish_to_wp(
     wp_url: str,
@@ -58,7 +58,7 @@ def publish_to_wp(
     timeout: int = 60,
 ) -> int:
     """
-    - publish_to_wp는 data["content_html"]이 있으면 그걸 그대로 사용
+    - data["content_html"]이 있으면 그걸 그대로 사용 (✅ 여기서 HTML을 절대 escape 하지 않음)
     - 없으면 기존 content 기반으로 기본 HTML 구성
     """
     wp_url = wp_url.rstrip("/")
