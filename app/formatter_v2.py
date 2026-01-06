@@ -1,51 +1,78 @@
-# app/formatter_v2.py
 from __future__ import annotations
 
+import html
+import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Sequence
 
 
-def _escape_html(s: str) -> str:
-    if s is None:
+def _env(key: str, default: str = "") -> str:
+    return (os.getenv(key) or default).strip()
+
+
+def _escape(s: str) -> str:
+    return html.escape(s or "", quote=False)
+
+
+def _bold_to_color(text: str) -> str:
+    """
+    사용자가 강조하고 싶은 단어를 LLM이 **굵게**로 찍으면,
+    프론트에서 색+굵게로 보이도록 변환합니다.
+    """
+    if not text:
         return ""
-    s = str(s)
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return s
+    safe = _escape(text)
+
+    # **...** -> span 강조
+    safe = re.sub(
+        r"\*\*(.+?)\*\*",
+        r'<span style="color:#2563eb;font-weight:800;">\1</span>',
+        safe,
+    )
+    return safe
 
 
-def _build_highlighter(terms: List[str], max_hits_total: int = 24):
+def _render_bullets(items: Optional[Sequence[str]]) -> str:
+    arr = [x.strip() for x in (items or []) if isinstance(x, str) and x.strip()]
+    if not arr:
+        return ""
+    lis = "\n".join(f"<li>{_bold_to_color(x)}</li>" for x in arr)
+    return f"<ul>\n{lis}\n</ul>"
+
+
+def _ad_block(kind: str) -> str:
     """
-    terms에 포함된 단어를 <span class="hl">로 감싸 강조합니다.
-    너무 과도해지지 않도록 전체 히트 수 제한.
+    수동 광고:
+    - ADSENSE_TOP / ADSENSE_MID / ADSENSE_BOTTOM 에 코드나 쇼트코드를 넣으면 그대로 들어갑니다.
+    - 예: [adinserter block="1"]
     """
-    terms = [t.strip() for t in terms if isinstance(t, str) and t.strip()]
-    # 너무 짧은 글자/중복 제거
-    uniq: List[str] = []
-    for t in terms:
-        if len(t) < 2:
-            continue
-        if t not in uniq:
-            uniq.append(t)
-    if not uniq:
-        return lambda x: x
+    key = {"top": "ADSENSE_TOP", "mid": "ADSENSE_MID", "bottom": "ADSENSE_BOTTOM"}.get(kind, "")
+    code = _env(key, "")
+    if not code:
+        return ""
+    # WP가 쇼트코드/스크립트를 처리하도록 escape 하지 않습니다.
+    return f"""
+<div class="adsense-manual adsense-{kind}">
+{code}
+</div>
+""".strip()
 
-    # 긴 단어 우선 매칭
-    uniq.sort(key=len, reverse=True)
-    pat = re.compile("(" + "|".join(map(re.escape, uniq)) + ")")
 
-    hit = {"n": 0}
+def _h2(title: str) -> str:
+    t = _escape(title)
+    # style은 WP에서 허용되는 경우가 많고, 허용 안 돼도 h2 자체는 렌더됩니다.
+    return f"""
+<h2 style="margin:34px 0 12px; padding:12px 14px; border-left:6px solid #16a34a; background:#f0fdf4; border-radius:12px; font-size:20px; line-height:1.35;">
+{t}
+</h2>
+""".strip()
 
-    def apply(text: str) -> str:
-        if not text:
-            return ""
-        def repl(m):
-            if hit["n"] >= max_hits_total:
-                return m.group(0)
-            hit["n"] += 1
-            return f'<span class="hl">{m.group(0)}</span>'
-        return pat.sub(repl, text)
 
-    return apply
+def _para(text: str) -> str:
+    t = _bold_to_color(text)
+    if not t:
+        return ""
+    return f"<p style='margin:0 0 14px; font-size:17px; line-height:1.85; color:#111827;'>{t}</p>"
 
 
 def format_post_v2(
@@ -56,301 +83,115 @@ def format_post_v2(
     body_url: str,
     disclosure_html: str = "",
     summary_bullets: Optional[List[str]] = None,
-    sections: Optional[List[Dict[str, Any]]] = None,
+    sections: Optional[list] = None,
     warning_bullets: Optional[List[str]] = None,
     checklist_bullets: Optional[List[str]] = None,
-    outro: str = "",
-    highlight_terms: Optional[List[str]] = None,
-    # ✅ 쿠팡/추가 블록을 “HTML로” 주입(본문에 코드 튀는 문제 방지)
-    extra_top_html: str = "",
-    extra_mid_html: str = "",
-    extra_bottom_html: str = "",
-) -> str:
-    title = (title or "").strip()
-    keyword = (keyword or "").strip()
-
-    summary_bullets = summary_bullets or []
+    outro: Optional[str] = None,
+):
+    """
+    main.py에서 _as_html()로 감싸 쓰고 있으니 문자열 반환하면 됩니다.
+    """
     sections = sections or []
-    warning_bullets = warning_bullets or []
-    checklist_bullets = checklist_bullets or []
+    # 섹션 3개 기준으로 우선 배치(더 많으면 뒤로 이어붙임)
+    sec_titles: List[str] = []
+    sec_bodies: List[str] = []
 
-    # highlight terms: AI가 준 값 우선, 없으면 키워드 토큰 일부 사용
-    ht = []
-    if highlight_terms:
-        ht = [x for x in highlight_terms if isinstance(x, str)]
-    if not ht:
-        ht = [t for t in re.split(r"\s+", keyword) if len(t) >= 2][:6]
+    for it in sections:
+        if isinstance(it, dict):
+            h = (it.get("title") or it.get("heading") or it.get("h2") or "").strip()
+            b = (it.get("body") or it.get("content") or "").strip()
+            if h and b:
+                sec_titles.append(h)
+                sec_bodies.append(b)
+        elif isinstance(it, (list, tuple)) and len(it) >= 2:
+            h = str(it[0] or "").strip()
+            b = str(it[1] or "").strip()
+            if h and b:
+                sec_titles.append(h)
+                sec_bodies.append(b)
 
-    highlighter = _build_highlighter(ht, max_hits_total=22)
-
-    def P(text: str) -> str:
-        t = _escape_html(text)
-        t = highlighter(t)
-        return f"<p class='p'>{t}</p>"
-
-    def LI(text: str) -> str:
-        t = _escape_html(text)
-        t = highlighter(t)
-        return f"<li>{t}</li>"
-
-    # sections normalize
-    norm_sections: List[Dict[str, Any]] = []
-    for s in sections:
-        if not isinstance(s, dict):
-            continue
-        h2 = (s.get("h2") or s.get("title") or "").strip()
-        paras = s.get("paras") or s.get("paragraphs") or []
-        bullets = s.get("bullets") or []
-        if isinstance(paras, str):
-            paras = [paras]
-        if isinstance(bullets, str):
-            bullets = [bullets]
-        norm_sections.append({"h2": h2, "paras": paras, "bullets": bullets})
-
-    # ✅ 요청하신 글 순서
-    # 1. 제목
-    # 2. 에드센스 수동광고
-    # 3. 본글 요약
-    # 4. 이미지
-    # 5. 소제목/본문1
-    # 7. 소제목/본문2
-    # 9. 에드센스 수동광고
-    # 10. 소제목/본문3
-    # 12. 에드센스 수동광고
-    # (쿠팡글도 이 틀을 크게 벗어나지 않게 extra_* 로 끼워 넣음)
-
-    # Ads placeholders (수동광고)
-    ADS_TOP = "<div class='ad ad-top'>[ADSENSE_MANUAL_TOP]</div>"
-    ADS_MID = "<div class='ad ad-mid'>[ADSENSE_MANUAL_MID]</div>"
-    ADS_BOT = "<div class='ad ad-bot'>[ADSENSE_MANUAL_BOT]</div>"
-
-    # Summary box
+    # 요약
     summary_html = ""
     if summary_bullets:
         summary_html = f"""
-<div class="box box-summary">
-  <div class="box-title">요약</div>
-  <ul class="ul">
-    {''.join(LI(x) for x in summary_bullets[:6])}
-  </ul>
+<div style="margin:18px 0 8px;">
+  <div style="padding:14px 14px; border:1px solid #e5e7eb; border-radius:14px; background:#ffffff;">
+    <p style="margin:0 0 10px; font-weight:800; font-size:16px;">📌 본문 요약</p>
+    {_render_bullets(summary_bullets)}
+  </div>
 </div>
 """.strip()
 
-    # Disclosure
-    disclosure_block = ""
-    if disclosure_html:
-        disclosure_block = f"""
-<div class="box box-disclosure">
-  {disclosure_html}
+    # 히어로 이미지(요약 다음)
+    hero_html = f"""
+<div style="margin:18px 0 22px;">
+  <img src="{hero_url}" alt="{_escape(title)}" style="width:100%; border-radius:16px; box-shadow:0 6px 18px rgba(0,0,0,0.10);" />
 </div>
 """.strip()
 
-    # Images
-    hero_img = ""
-    if hero_url:
-        hero_img = f"""
-<div class="img-wrap">
-  <img src="{_escape_html(hero_url)}" alt="{_escape_html(title)}" />
-</div>
-""".strip()
-
-    body_img = ""
-    if body_url:
-        body_img = f"""
-<div class="img-wrap">
-  <img src="{_escape_html(body_url)}" alt="{_escape_html(title)} 관련 이미지" />
-</div>
-""".strip()
-
-    def render_section(sec: Dict[str, Any]) -> str:
-        h2 = sec.get("h2") or ""
-        paras = sec.get("paras") or []
-        bullets = sec.get("bullets") or []
-        h2_html = ""
-        if h2:
-            h2_html = f"<h2 class='h2'>{_escape_html(h2)}</h2>"
-        paras_html = "".join(P(x) for x in paras if isinstance(x, str) and x.strip())
-        bullets_html = ""
-        bl = [x for x in bullets if isinstance(x, str) and x.strip()]
-        if bl:
-            bullets_html = f"<ul class='ul'>{''.join(LI(x) for x in bl[:8])}</ul>"
-        return f"<section class='sec'>{h2_html}{paras_html}{bullets_html}</section>"
-
-    # pick up to 3 sections
-    s1 = norm_sections[0] if len(norm_sections) >= 1 else {"h2": "핵심 정리", "paras": [], "bullets": []}
-    s2 = norm_sections[1] if len(norm_sections) >= 2 else {"h2": "실전 팁", "paras": [], "bullets": []}
-    s3 = norm_sections[2] if len(norm_sections) >= 3 else {"h2": "체크 포인트", "paras": [], "bullets": []}
-
-    # Warning/Checklist/Outro (원하면 섹션 뒤에 붙여도 됨)
-    extra_boxes = ""
+    # 경고/체크리스트(있을 때만)
+    warn_html = ""
     if warning_bullets:
-        extra_boxes += f"""
-<div class="box box-warn">
-  <div class="box-title">주의할 점</div>
-  <ul class="ul">{''.join(LI(x) for x in warning_bullets[:8])}</ul>
+        warn_html = f"""
+<div style="margin:18px 0;">
+  <div style="padding:14px 14px; border-radius:14px; background:#fff7ed; border:1px solid #fed7aa;">
+    <p style="margin:0 0 10px; font-weight:800;">⚠️ 주의</p>
+    {_render_bullets(warning_bullets)}
+  </div>
 </div>
 """.strip()
+
+    checklist_html = ""
     if checklist_bullets:
-        extra_boxes += f"""
-<div class="box box-check">
-  <div class="box-title">오늘의 체크리스트</div>
-  <ul class="ul">{''.join(LI(x) for x in checklist_bullets[:10])}</ul>
+        checklist_html = f"""
+<div style="margin:18px 0;">
+  <div style="padding:14px 14px; border-radius:14px; background:#eff6ff; border:1px solid #bfdbfe;">
+    <p style="margin:0 0 10px; font-weight:800;">✅ 체크리스트</p>
+    {_render_bullets(checklist_bullets)}
+  </div>
 </div>
 """.strip()
+
+    # 본문 구성(요청하신 포맷 고정)
+    parts: List[str] = []
+    if disclosure_html:
+        parts.append(disclosure_html)
+
+    parts.append(_ad_block("top"))          # 2. 에드센스 수동광고(상단)
+    parts.append(summary_html)              # 3. 본글 요약
+    parts.append(hero_html)                 # 4. 이미지(히어로)
+
+    # 섹션 1~N
+    for idx, (h, b) in enumerate(zip(sec_titles, sec_bodies)):
+        if idx == 2:
+            parts.append(_ad_block("mid"))  # 9. 에드센스 수동광고(중간) - 3번째 섹션 앞
+        parts.append(_h2(h))
+        # 본문은 여러 문단일 수 있으니 줄바꿈 기준으로 p 분리
+        for para in [x.strip() for x in b.split("\n") if x.strip()]:
+            parts.append(_para(para))
+
+        # 중간 이미지(원하시면 2번째 섹션 끝에 넣기)
+        if idx == 1 and body_url:
+            parts.append(f"""
+<div style="margin:22px 0;">
+  <img src="{body_url}" alt="{_escape(title)} 관련 이미지" style="width:100%; border-radius:16px; box-shadow:0 6px 18px rgba(0,0,0,0.08);" />
+</div>
+""".strip())
+
+    parts.append(warn_html)
+    parts.append(checklist_html)
+
     if outro:
-        extra_boxes += f"<div class='outro'>{P(outro)}</div>"
+        parts.append(_h2("마무리"))
+        for para in [x.strip() for x in str(outro).split("\n") if x.strip()]:
+            parts.append(_para(para))
 
-    # ✅ 전체 HTML (WordPress가 “그대로” 렌더하도록 HTML 블록 하나로 묶음)
-    html = f"""
-<!-- wp:html -->
-<div class="post-wrap">
+    parts.append(_ad_block("bottom"))       # 12. 에드센스 수동광고(하단)
 
-<style>
-.post-wrap {{
-  max-width: 860px;
-  margin: 0 auto;
-  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo","Malgun Gothic", Arial, sans-serif;
-  line-height: 1.85;
-  color: #111827;
-}}
-.post-title {{
-  font-size: 30px;
-  font-weight: 900;
-  letter-spacing: -0.02em;
-  margin: 10px 0 14px;
-}}
-.ad {{
-  border: 1px dashed #cbd5e1;
-  border-radius: 14px;
-  padding: 18px;
-  margin: 16px 0;
-  background: #f8fafc;
-  text-align: center;
-  color: #64748b;
-  font-weight: 800;
-}}
-.box {{
-  border: 1px solid #e5e7eb;
-  border-radius: 16px;
-  padding: 14px 14px;
-  margin: 16px 0;
-  background: #ffffff;
-}}
-.box-title {{
-  font-weight: 900;
-  margin-bottom: 8px;
-}}
-.box-summary {{ background: #f0f9ff; border-color: #bae6fd; }}
-.box-warn {{ background: #fff7ed; border-color: #fed7aa; }}
-.box-check {{ background: #f0fdf4; border-color: #bbf7d0; }}
-.box-disclosure {{ background: #fff7ed; border-color: #fed7aa; }}
-.h2 {{
-  margin: 24px 0 10px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: #111827;
-  color: #ffffff;
-  font-size: 18px;
-  font-weight: 900;
-}}
-.p {{
-  margin: 0 0 14px;
-  font-size: 17px;
-}}
-.ul {{
-  margin: 0;
-  padding-left: 18px;
-}}
-.ul li {{
-  margin: 6px 0;
-  font-size: 16px;
-}}
-.img-wrap {{
-  margin: 18px 0;
-}}
-.img-wrap img {{
-  width: 100%;
-  border-radius: 16px;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
-}}
-.hl {{
-  color: #0ea5e9; /* 강조 단어 색 */
-  font-weight: 900;
-}}
-.sec {{
-  margin: 6px 0 18px;
-}}
-.outro {{
-  margin-top: 8px;
-}}
-/* 쿠팡 블록 클래스(테마 영향 줄이기 위해 기본만) */
-.coupang-wrap {{
-  border: 1px solid #e5e7eb;
-  border-radius: 16px;
-  padding: 14px;
-  background: #f8fafc;
-  margin: 16px 0;
-}}
-.coupang-grid {{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-}}
-.coupang-card {{
-  border: 1px solid #e5e7eb;
-  border-radius: 14px;
-  padding: 12px;
-  background: #ffffff;
-}}
-.coupang-btn {{
-  display: block;
-  text-align: center;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: #111827;
-  color: #ffffff !important;
-  text-decoration: none !important;
-  font-weight: 900;
-}}
-.coupang-note {{
-  color: #64748b;
-  font-size: 12px;
-  margin-top: 10px;
-}}
-</style>
+    final = "\n".join([p for p in parts if p and p.strip()])
 
-<div class="post-title">{_escape_html(title)}</div>
-
-{disclosure_block}
-
-{ADS_TOP}
-
-{summary_html}
-
-{hero_img}
-
-{extra_top_html}
-
-{render_section(s1)}
-
-{body_img}
-
-{render_section(s2)}
-
-{ADS_MID}
-
-{extra_mid_html}
-
-{render_section(s3)}
-
-{extra_boxes}
-
-{ADS_BOT}
-
-{extra_bottom_html}
-
+    return f"""
+<div style="font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;">
+{final}
 </div>
-<!-- /wp:html -->
 """.strip()
-
-    return html
