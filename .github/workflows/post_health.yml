@@ -2,7 +2,7 @@ name: Post Health (10:00 KST)
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # 10:00 KST = 01:00 UTC
+    - cron: "0 1 * * *" # 10:00 KST = 01:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -18,17 +18,17 @@ jobs:
     env:
       RUN_SLOT: health
       STRICT_RUN_SLOT: "1"
+      ENFORCE_TIME_WINDOW: "1"
       SKIP_DUPLICATE_SLOT: "1"
-      ENFORCE_TIME_WINDOW: ${{ github.event_name == 'schedule' && '1' || '0' }}
-      SLOT_WINDOW_MIN: "120"
-      FORCE_COUPANG_IN_LIFE: "1"
+      SLOT_WINDOW_MIN: "90"
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
           cache: "pip"
 
       - name: Install fonts (Korean)
@@ -51,32 +51,32 @@ jobs:
 
       - name: Run script
         env:
-          # GitHub event name (main.py가 수동/스케줄 구분에 사용)
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-
-          # NAVER
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-          NAVER_SEED_KEYWORDS_HEALTH: "갱년기,혈압관리,고지혈증,수면질개선,중년운동,스트레스관리,관절건강,식단관리"
 
-          # OpenAI / Image
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          # IMAGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-          # AdSense (옵션)
           ADSENSE_CLIENT: ${{ secrets.ADSENSE_CLIENT }}
           ADSENSE_SLOT_TOP: ${{ secrets.ADSENSE_SLOT_TOP }}
           ADSENSE_SLOT_MID: ${{ secrets.ADSENSE_SLOT_MID }}
           ADSENSE_SLOT_BOTTOM: ${{ secrets.ADSENSE_SLOT_BOTTOM }}
 
-          # WordPress
           WP_URL: ${{ secrets.WP_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
-          # Coupang (life에서만 쓰이지만, 공통으로 넣어도 OK)
           COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
           COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
           COUPANG_DISCLOSURE_TEXT: ${{ secrets.COUPANG_DISCLOSURE_TEXT }}
+
+          FORCE_COUPANG_IN_LIFE: "1"
         run: python main.py
+
+      - name: Upload preview html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-html-${{ github.run_id }}
+          path: preview/*.html
+          if-no-files-found: warn
