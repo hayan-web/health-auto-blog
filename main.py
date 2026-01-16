@@ -1,4 +1,4 @@
-# main.py (LATEST INTEGRATED FINAL - copy/paste)
+# main.py (LATEST INTEGRATED FINAL + WP RETRY + last_run AFTER SUCCESS - copy/paste)
 from __future__ import annotations
 
 import base64
@@ -39,26 +39,21 @@ from app.click_ingest import ingest_click_log
 from app.prioritizer import pick_best_publishing_combo
 from app.cooldown import CooldownRule, apply_cooldown_rules
 from app.news_context import build_news_context
-
 from app.formatter_v2 import format_post_v2
-
 from app.image_stats import (
     record_impression as record_image_impression,
     update_score as update_image_score,
 )
 from app.image_style_picker import pick_image_style
-
 from app.quality_gate import quality_retry_loop
 from app.prompt_router import build_system_prompt, build_user_prompt
 from app.guardrails import GuardConfig, check_limits_or_raise, increment_post_count
-
 from app.thumb_title_stats import (
     record_impression as record_thumb_impression,
     update_score as update_thumb_score,
     record_topic_impression as record_topic_thumb_impression,
     update_topic_score as update_topic_thumb_score,
 )
-
 from app.life_subtopic_picker import pick_life_subtopic
 from app.life_subtopic_stats import (
     record_life_subtopic_impression,
@@ -91,6 +86,71 @@ def _as_html(x: Any) -> str:
     if isinstance(x, tuple) and len(x) >= 1:
         return x[0] or ""
     return x or ""
+
+
+# -----------------------------
+# WP PUBLISH RETRY (503/502/504/429 등 일시 장애 자동 재시도)
+# -----------------------------
+def _sleep_s(seconds: int) -> None:
+    try:
+        time.sleep(seconds)
+    except Exception:
+        pass
+
+
+def _should_retry_wp_error(msg: str) -> bool:
+    m = (msg or "").lower()
+    return (
+        " 503 " in m
+        or "status: 503" in m
+        or "wp-die" in m
+        or "briefly unavailable" in m
+        or "maintenance" in m
+        or " 502 " in m
+        or " 504 " in m
+        or " 429 " in m
+        or "timeout" in m
+        or "timed out" in m
+        or "bad gateway" in m
+        or "gateway time-out" in m
+        or "connection reset" in m
+    )
+
+
+def publish_to_wp_with_retry(
+    *,
+    wp_url: str,
+    wp_user: str,
+    wp_pw: str,
+    post: dict,
+    hero_url: str,
+    body_url: str,
+    featured_media_id: int,
+) -> int:
+    max_try = _env_int("WP_PUBLISH_RETRY_MAX", 4)       # 기본 4회
+    base_sleep = _env_int("WP_PUBLISH_RETRY_SLEEP", 25)  # 기본 25초
+    last_err = ""
+
+    for i in range(1, max_try + 1):
+        try:
+            return publish_to_wp(
+                wp_url,
+                wp_user,
+                wp_pw,
+                post,
+                hero_url,
+                body_url,
+                featured_media_id=featured_media_id,
+            )
+        except Exception as e:
+            last_err = str(e)
+            if (not _should_retry_wp_error(last_err)) or (i == max_try):
+                raise
+            wait = base_sleep * i
+            print(f"⚠️ WP publish 실패(재시도 {i}/{max_try}) → {wait}s 대기: {last_err[:180]}")
+            _sleep_s(wait)
+
+    raise RuntimeError(last_err or "publish failed")
 
 
 # -----------------------------
@@ -447,7 +507,7 @@ def _build_image_prompt(base: str, *, variant: str, seed: int, style_mode: str) 
 
 
 # -----------------------------
-# COUPANG: 키워드 -> 딥링크 3개 (✅ 여기서 끊김 없게 완성)
+# COUPANG: 키워드 -> 딥링크 3개
 # -----------------------------
 def _coupang_make_auth(method: str, path: str, query: str, access_key: str, secret_key: str) -> str:
     signed_date = datetime.utcnow().strftime("%y%m%dT%H%M%SZ")
@@ -526,7 +586,7 @@ def _coupang_links_from_keyword(keyword: str) -> List[Tuple[str, str]]:
 
 
 # -----------------------------
-# COUPANG UI (✅ 버튼만! + 눈에 띄게)
+# COUPANG UI (버튼만 + 눈에 띄게)
 # -----------------------------
 def _coupang_disclosure_html() -> str:
     txt = _env(
@@ -546,7 +606,6 @@ def _coupang_buttons_html(links: List[Tuple[str, str]], keyword: str) -> str:
     if not links:
         return ""
 
-    # 버튼만 나오게: 세로 스택 + 풀폭
     btns = []
     for label, url in links[:3]:
         if label == "바로보기":
@@ -569,7 +628,7 @@ def _coupang_buttons_html(links: List[Tuple[str, str]], keyword: str) -> str:
         )
 
     return (
-        f"<div style='margin:16px 0;padding:14px;border:1px solid #e5e7eb;border-radius:14px;background:#f8fafc;'>"
+        "<div style='margin:16px 0;padding:14px;border:1px solid #e5e7eb;border-radius:14px;background:#f8fafc;'>"
         f"<div style='font-weight:900;font-size:16px;margin-bottom:10px;'>🛒 {keyword} 빠른 확인</div>"
         + "".join(btns) +
         "<div style='color:#6b7280;font-size:12px;line-height:1.4;margin-top:8px;'>"
@@ -644,9 +703,6 @@ def _category_name_for_topic(topic: str) -> str:
 
 
 def _set_post_category(wp_url: str, user: str, pw: str, post_id: int, cat_id: int) -> None:
-    """
-    publish_to_wp가 categories를 반영하지 않는 버전이어도, 발행 후 PATCH로 카테고리를 확실히 맞춥니다.
-    """
     try:
         wp_url = wp_url.rstrip("/")
         endpoint = f"{wp_url}/wp-json/wp/v2/posts/{post_id}"
@@ -695,22 +751,18 @@ def run() -> None:
     forced_slot, topic = _pick_run_topic(state)
     print(f"🕒 run_id={run_id} | event={event_name} | forced_slot={forced_slot} -> topic={topic} | kst_now={_kst_now()}")
 
-    # 시간창 강제는 스케줄에서만
+    # ✅ 시간창 강제(기본은 yml에서 ENFORCE_TIME_WINDOW=0 권장)
     if _env("RUN_SLOT", "").lower() in ("health", "trend", "life"):
-        if is_schedule and _env_bool("ENFORCE_TIME_WINDOW", "1"):
+        if is_schedule and _env_bool("ENFORCE_TIME_WINDOW", "0"):
             if not _in_time_window(forced_slot):
                 print(f"🛑 out of time window: slot={forced_slot} expected={_expected_hour(forced_slot)}:00 KST → exit(0)")
                 return
 
-    # 같은 슬롯 중복 방지: 스케줄에서만
+    # ✅ 같은 슬롯 중복 방지: 스케줄에서만
     if is_schedule and _env_bool("SKIP_DUPLICATE_SLOT", "1"):
         if _already_ran_this_slot(state, forced_slot):
             print(f"🛑 same slot already ran today: {forced_slot} → exit(0)")
             return
-
-    # mark run
-    state = _mark_ran_this_slot(state, forced_slot, run_id)
-    save_state(state)
 
     # keyword
     keyword, _ = pick_keyword_by_naver(S.NAVER_CLIENT_ID, S.NAVER_CLIENT_SECRET, history)
@@ -722,7 +774,6 @@ def run() -> None:
         print("🧩 life_subtopic:", life_subtopic, "| dbg(top3):", (sub_dbg.get("scored") or [])[:3])
         keyword = f"{keyword} {life_subtopic}".strip()
 
-    # seed
     seed = _stable_seed_int(keyword, run_id, str(int(time.time())))
 
     system_prompt = build_system_prompt(topic)
@@ -778,11 +829,11 @@ def run() -> None:
         else:
             raise
 
-    # ✅ 티스토리식 짧은 제목으로 “강제 업그레이드”
+    # ✅ 티스토리식 짧은 제목 강제
     raw_title = post.get("title", "")
     post["title"] = _finalize_title(topic, keyword, raw_title, recent, seed)
 
-    # 제목이 여전히 유사하면 OpenAI로 1~2회만 재작성
+    # 제목이 유사하면 OpenAI로 1~2회 재작성
     for _ in range(2):
         if (not post["title"]) or _title_too_similar(post["title"], recent, threshold=0.45):
             t2 = _rewrite_title_openai_tistory(
@@ -857,9 +908,15 @@ def run() -> None:
         body_img, make_ascii_filename("body")
     )
 
-    # 카테고리 지정
+    # 카테고리 지정(발행 후에도 PATCH로 확정)
+    cat_id = 0
     cat_name = _category_name_for_topic(topic)
-    cat_id = ensure_category_id(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, name=cat_name)
+    try:
+        cid = ensure_category_id(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, name=cat_name)
+        cat_id = int(cid or 0)
+    except Exception as e:
+        print(f"⚠️ category resolve error: {e}")
+
     if cat_id:
         post["categories"] = [cat_id]
         print(f"📁 category set: {cat_name} (id={cat_id})")
@@ -891,13 +948,8 @@ def run() -> None:
             disclosure = _coupang_disclosure_html()
             buttons = _coupang_buttons_html(coupang_urls, keyword=keyword)
 
-            # 상단: 대가성 문구
             html = disclosure + "\n" + html
-
-            # 요약(첫 ul) 다음: 버튼 묶음
             html = _insert_after_first_ul_safe(html, buttons)
-
-            # 중간/하단: 한번 더 리마인드(버튼만)
             html = _insert_near_second_h2_safe(html, buttons)
             html = _insert_end(html, buttons)
 
@@ -908,13 +960,21 @@ def run() -> None:
 
     post["content_html"] = html
 
-    post_id = publish_to_wp(
-        S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD,
-        post, hero_url, body_url,
-        featured_media_id=hero_media_id,
+    # ✅ WP 일시 장애(503 등) 재시도 포함 발행
+    post_id = publish_to_wp_with_retry(
+        wp_url=S.WP_URL,
+        wp_user=S.WP_USERNAME,
+        wp_pw=S.WP_APP_PASSWORD,
+        post=post,
+        hero_url=hero_url,
+        body_url=body_url,
+        featured_media_id=int(hero_media_id or 0),
     )
 
-    # ✅ publish_to_wp가 categories를 반영 안 해도, 발행 후 강제 PATCH
+    # ✅ 발행 성공했을 때만 last_run 기록 (중복 방지용)
+    state = _mark_ran_this_slot(state, forced_slot, run_id)
+
+    # ✅ categories 반영 안 되는 WP 클라이언트 대비: 발행 후 PATCH
     if cat_id:
         _set_post_category(S.WP_URL, S.WP_USERNAME, S.WP_APP_PASSWORD, int(post_id), int(cat_id))
 
