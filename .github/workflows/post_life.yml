@@ -18,7 +18,7 @@ jobs:
     env:
       RUN_SLOT: life
       STRICT_RUN_SLOT: "1"
-      ENFORCE_TIME_WINDOW: "1"
+      ENFORCE_TIME_WINDOW: "0"
       SKIP_DUPLICATE_SLOT: "1"
       SLOT_WINDOW_MIN: "90"
 
