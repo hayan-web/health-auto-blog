@@ -1,4 +1,3 @@
-```python
 # main.py (LATEST INTEGRATED FINAL + WP RETRY + last_run AFTER SUCCESS + TITLE PREFIX STRIP - copy/paste)
 from __future__ import annotations
 
@@ -1053,4 +1052,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-```
